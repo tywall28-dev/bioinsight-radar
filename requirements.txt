@@ -1,0 +1,29 @@
+# BioInsight Agentic Radar — Phase 1 Dependencies
+# Pin major versions; update minor as needed.
+
+# Vector DB
+chromadb>=0.5.0
+
+# LangChain / LangGraph ecosystem
+langchain-core>=0.2.0
+langgraph>=0.1.0
+
+# PubMed wrapper (avoids raw Entrez XML parsing)
+metapub>=0.5.5
+
+# HTTP
+requests>=2.31.0
+
+# Hugging Face (for local fallback or tokenizer use)
+transformers>=4.40.0
+torch>=2.2.0          # CPU-only is fine for Phase 1
+
+# Dimensionality reduction + clustering (Phase 3 prep)
+umap-learn>=0.5.6
+hdbscan>=0.8.33
+numpy>=1.26.0
+scikit-learn>=1.4.0
+
+# Visualization (Phase 3 / Streamlit)
+plotly>=5.20.0
+streamlit>=1.35.0

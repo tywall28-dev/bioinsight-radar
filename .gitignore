@@ -1,0 +1,15 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables (secrets)
+.env
+
+# VS Code settings
+.vscode/
+
+# ChromaDB local database
+bioinsight_db/

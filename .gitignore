@@ -13,3 +13,6 @@ __pycache__/
 
 # ChromaDB local database
 bioinsight_db/
+
+# Package build artifacts
+bioinsight.egg-info/

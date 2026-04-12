@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-bioinsight/__init__.py
-bioinsight/chroma_manager.py
-bioinsight/fetcher_tools.py
-bioinsight.egg-info/PKG-INFO
-bioinsight.egg-info/SOURCES.txt
-bioinsight.egg-info/dependency_links.txt
-bioinsight.egg-info/top_level.txt

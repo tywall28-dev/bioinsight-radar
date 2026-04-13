@@ -27,3 +27,6 @@ scikit-learn>=1.4.0
 # Visualization (Phase 3 / Streamlit)
 plotly>=5.20.0
 streamlit>=1.35.0
+
+#GPU-Based Embedding
+torch>=2.5.1+cu121

@@ -5,6 +5,7 @@ from langchain_anthropic import ChatAnthropic
 from bioinsight.state import AgentState
 from bioinsight.chroma_manager import BioInsightChromaManager
 from bioinsight.fetcher_tools import fetch_pubmed, fetch_nih_reporter
+from bioinsight.embedder import BioInsightEmbedder
 
 load_dotenv()
 llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
@@ -20,11 +21,10 @@ def router_node(state: AgentState) -> dict:
         {{
             "domain": "the disease or research area (e.g. parkinsons, autism)",
             "years": [list of years mentioned or implied],
-            "query_type": "macro or micro"
+            "entity": "the specific entity or concept being researched",
+            "specificity": [1 to 5, where 1 is very broad and 5 is very specific],
+            "source_filter": "pubmed, nih_reporter, both"
         }}
-
-        macro = broad topic landscape questions
-        micro = specific mechanism or pathway questions
 
         User question: {state["user_query"]}"""
 
@@ -34,7 +34,9 @@ def router_node(state: AgentState) -> dict:
     return {
         "domain": parsed["domain"],
         "years": parsed["years"],
-        "query_type": parsed["query_type"],
+        "entity": parsed.get("entity"),
+        "specificity": parsed["specificity"],
+        "source_filter": parsed["source_filter"],
     }
 
 
@@ -45,7 +47,6 @@ def library_checker_node(state: AgentState) -> dict:
 
     # call library checker logic
     library_has_data = all(chroma.domain_year_exists(domain, year) for year in years)
-
     return {"library_has_data": library_has_data}
 
 

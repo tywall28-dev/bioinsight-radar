@@ -2,8 +2,8 @@ from bioinsight.chroma_manager import BioInsightChromaManager
 from bioinsight.embedder import BioInsightEmbedder
 from bioinsight.fetcher_tools import fetch_pubmed, fetch_nih_reporter
 
-seed_domains = ["parkinsons"]
-seed_years = [2023]
+seed_domains = ["parkinsons","autism"]
+seed_years = [2023,2024,2025]
 
 def seed_library():
     chroma = BioInsightChromaManager(persist_dir="./bioinsight_db")

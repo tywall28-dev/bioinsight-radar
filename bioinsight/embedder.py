@@ -10,7 +10,6 @@ class BioInsightEmbedder:
         self.model.eval()
 
     def embed_records(self, records: list) -> list:
-        print(f"Made it!")
         # 1. Verification: Ensure records actually have text
         texts = [getattr(r, 'text', '') for r in records]
         if not any(texts):
@@ -18,7 +17,6 @@ class BioInsightEmbedder:
             return records
 
         embeddings = self._embed_texts(texts)
-        print(f"Fetched {len(all_records)} records for {domain} in {year}.")
         
         # 2. Robust Update: Ensure the embedding is attached to the record object
         for i in range(len(records)):

@@ -29,6 +29,16 @@ def seed_library():
 
             # Embed and upsert into ChromaDB
             embedded_records = embedder.embed_records(all_records)
+
+            if len(embedded_records) > 0:
+                second_rec = embedded_records[1]
+                # Check if 'embedding' attribute actually exists and has data
+                emb = getattr(second_rec, 'embedding', None)
+                if emb is not None:
+                    print(f"DEBUG: Second record embedded! Vector length: {len(emb)}")
+                else:
+                    print("DEBUG: ERROR - Record returned but 'embedding' is MISSING.")
+
             chroma.upsert_records(embedded_records)
             print(f"Upserted {len(embedded_records)} records for {domain} in {year}.")
 

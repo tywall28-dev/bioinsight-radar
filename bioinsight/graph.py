@@ -28,5 +28,6 @@ graph.add_conditional_edges(
     },
 )
 
+graph.add_edge("fetcher", "library_checker")
 graph.set_entry_point("router")
 app = graph.compile()

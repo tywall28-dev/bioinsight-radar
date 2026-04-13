@@ -2,6 +2,10 @@
 name = "bioinsight"
 version = "0.1.0"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bioinsight*"]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

@@ -38,7 +38,7 @@ import requests
 from langchain_core.tools import tool
 from metapub import PubMedFetcher
 
-from chroma_manager import BioInsightRecord, GranularityType
+from bioinsight.chroma_manager import BioInsightRecord, GranularityType
 
 logger = logging.getLogger(__name__)
 

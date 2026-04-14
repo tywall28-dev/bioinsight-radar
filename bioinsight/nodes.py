@@ -135,7 +135,7 @@ def synthesis_node(state: AgentState) -> dict:
     clusters = state.get("clusters", {})
     specificity = state.get("specificity")
     cluster_summaries = {
-        label: docs[:3]
+        label: docs[:6]
         for label, docs in clusters.items()
         if label != -1  # skip noise cluster
     }

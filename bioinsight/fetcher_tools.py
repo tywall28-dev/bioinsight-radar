@@ -33,9 +33,12 @@ from __future__ import annotations
 import logging
 import time
 from typing import Optional
-
+import os
 import requests
 from langchain_core.tools import tool
+from dotenv import load_dotenv
+
+load_dotenv()
 from metapub import PubMedFetcher
 
 from bioinsight.chroma_manager import BioInsightRecord, GranularityType
@@ -85,11 +88,13 @@ def _infer_granularity(text: str) -> GranularityType:
 
 
 def _retry(fn, retries: int = 3, base_delay: float = 2.0):
-    """Simple exponential-back-off wrapper."""
     for attempt in range(retries):
         try:
             return fn()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            if "Invalid ID" in str(exc):
+                logger.warning("Skipping invalid ID: %s", exc)
+                return None  # skip immediately, don't retry
             if attempt == retries - 1:
                 raise
             wait = base_delay * (2**attempt)
@@ -258,7 +263,7 @@ def fetch_pubmed(
     """
     from metapub import PubMedFetcher  # lazy import — keeps startup fast
 
-    fetch = PubMedFetcher(email=email)
+    fetch = PubMedFetcher(email=email, api_key=os.environ.get("NCBI_API_KEY"))
     search_str = _build_pubmed_query(domain, query, year)
 
     logger.info("PubMed fetch  |  query='%s'  max=%d", search_str, max_results)

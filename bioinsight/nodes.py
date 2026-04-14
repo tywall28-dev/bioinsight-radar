@@ -13,7 +13,7 @@ import numpy as np
 load_dotenv()
 llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
 chroma = BioInsightChromaManager(persist_dir="./bioinsight_db")
-embedder = BioInsightEmbedder(model="dmis-lab/biobert-v1.1")
+embedder = BioInsightEmbedder(model_name="dmis-lab/biobert-v1.1")
 
 
 def router_node(state: AgentState) -> dict:

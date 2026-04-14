@@ -105,3 +105,37 @@ def subset_modeler_node(state: AgentState) -> dict:
         clusters[label].append(document)
 
     return {"clusters": clusters}
+
+
+def synthesis_node(state: AgentState) -> dict:
+    domain = state["domain"]
+    years = state["years"]
+    source_filter = state.get("source_filter")
+    clusters = state.get("clusters", {})
+    specificity = state.get("specificity")
+    cluster_summaries = {
+        label: docs[:3]
+        for label, docs in clusters.items()
+        if label != -1  # skip noise cluster
+    }
+
+    prompt = f"""You are a biomedical research analyst writing a report for a program officer.
+
+        Domain: {domain}
+        Years: {years}
+        Source: {source_filter}
+        Specificity: {specificity}
+
+        Research clusters identified:
+        {json.dumps(cluster_summaries, indent=2)}
+
+        Write a structured report with these sections:
+        1. Overview
+        2. Major Research Themes (one per cluster)
+        3. White Space / Gaps
+        4. Rising Signals"""
+
+    response = llm.invoke(prompt)
+    # Placeholder for synthesis logic
+    # In a real implementation, this would take the clustered data and generate a final answer
+    return {"final_answer": response.content}

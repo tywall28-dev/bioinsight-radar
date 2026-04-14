@@ -6,6 +6,9 @@ from bioinsight.state import AgentState
 from bioinsight.chroma_manager import BioInsightChromaManager
 from bioinsight.fetcher_tools import fetch_pubmed, fetch_nih_reporter
 from bioinsight.embedder import BioInsightEmbedder
+import umap
+import hdbscan
+import numpy as np
 
 load_dotenv()
 llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
@@ -77,3 +80,28 @@ def fetcher_node(state: AgentState) -> dict:
         "records_fetched": total_records,
         "fetch_attempts": state.get("fetch_attempts", 0) + 1,
     }
+
+
+def subset_modeler_node(state: AgentState) -> dict:
+    domain = state["domain"]
+    years = state["years"]
+    source_filter = state.get("source_filter")
+    results = chroma.get_domain_subset(domain, years, source_filter)
+    if not results["embeddings"]:
+        return {"clusters": {}, "error": "No records found for this query."}
+
+    embeddings_matrix = np.array(results["embeddings"])
+    umap_embeddings = umap.UMAP(
+        n_neighbors=15, min_dist=0.1, n_components=5
+    ).fit_transform(embeddings_matrix)
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=1)
+    cluster_labels = clusterer.fit_predict(umap_embeddings)
+
+    clusters = {}
+    for label, document in zip(cluster_labels, results["documents"]):
+        label = int(label)
+        if label not in clusters:
+            clusters[label] = []
+        clusters[label].append(document)
+
+    return {"clusters": clusters}

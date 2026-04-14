@@ -32,10 +32,31 @@ def router_node(state: AgentState) -> dict:
         User question: {state["user_query"]}"""
 
     response = llm.invoke(prompt)
-    parsed = json.loads(response.content)
+    content = response.content.strip()
+    # Strip markdown code blocks if present
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    content = content.strip()
+    parsed = json.loads(content)
+    print(f"DEBUG Router output: {parsed}")  # add this
+
+    DOMAIN_MAP = {
+        "parkinson's disease": "parkinsons",
+        "parkinson disease": "parkinsons",
+        "parkinsons disease": "parkinsons",
+        "alzheimer's disease": "alzheimers",
+        "alzheimer disease": "alzheimers",
+        "autistic disorder": "autism",
+        "autism spectrum disorder": "autism",
+    }
+
+    domain = parsed["domain"].lower()
+    domain = DOMAIN_MAP.get(domain, domain)
 
     return {
-        "domain": parsed["domain"],
+        "domain": domain,
         "years": parsed["years"],
         "entity": parsed.get("entity"),
         "specificity": parsed["specificity"],
@@ -87,7 +108,7 @@ def subset_modeler_node(state: AgentState) -> dict:
     years = state["years"]
     source_filter = state.get("source_filter")
     results = chroma.get_domain_subset(domain, years, source_filter)
-    if not results["embeddings"]:
+    if results["embeddings"] is None or len(results["embeddings"]) == 0:
         return {"clusters": {}, "error": "No records found for this query."}
 
     embeddings_matrix = np.array(results["embeddings"])

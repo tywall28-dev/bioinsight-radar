@@ -10,6 +10,7 @@ import umap
 import hdbscan
 import numpy as np
 
+
 load_dotenv()
 llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
 chroma = BioInsightChromaManager(persist_dir="./bioinsight_db")
@@ -18,10 +19,12 @@ embedder = BioInsightEmbedder(model_name="dmis-lab/biobert-v1.1")
 
 def router_node(state: AgentState) -> dict:
     # read from state
-    prompt = f"""You are parsing a biomedical research question.
+    prompt = f"""You are parsing a biomedical research question that is aiming to pull either pubmed articles or NIH reporter grants. 
+        Your task is to enrish the user query so that it can be embedded and used to query a vector database of biomedical research. You also need to extract the following information from the user query and return it in JSON format:
     
         Extract the following and return ONLY valid JSON, no other text:
         {{
+            "enriched_query": "a rewritten version of the user query that is optimized for embedding and retrieval. It should be more specific not include years or any information that could reduce similarity search efficiency and include relevant keywords.",
             "domain": "the disease or research area (e.g. parkinsons, autism)",
             "years": [list of years mentioned or implied],
             "entity": "the specific entity or concept being researched",
@@ -50,12 +53,28 @@ def router_node(state: AgentState) -> dict:
         "alzheimer disease": "alzheimers",
         "autistic disorder": "autism",
         "autism spectrum disorder": "autism",
+        "amyotrophic lateral sclerosis": "als",
+        "als": "als",
+        "lou gehrig's disease": "als",
     }
 
     domain = parsed["domain"].lower()
     domain = DOMAIN_MAP.get(domain, domain)
 
+    # Generate query embedding
+    try:
+        query_vector = embedder.embed_query(parsed["enriched_query"])
+        print(
+            f"DEBUG: Query vector generated successfully: {query_vector[:5]}..."
+        )  # add this
+    except Exception as e:
+        print(f"ERROR: Failed to embed query: {e}")
+        # Fallback: use a zero vector or skip embedding for now
+        query_vector = [0.0] * 768
+
     return {
+        "query_vector": query_vector,
+        "enriched_query": parsed["enriched_query"],
         "domain": domain,
         "years": parsed["years"],
         "entity": parsed.get("entity"),
@@ -66,17 +85,17 @@ def router_node(state: AgentState) -> dict:
 
 def library_checker_node(state: AgentState) -> dict:
     # read parameters from state
-    domain = state["domain"]
     years = state["years"]
+    query_vector = state.get("query_vector")
 
-    # call library checker logic
-    library_has_data = all(chroma.domain_year_exists(domain, year) for year in years)
+    # call library checker logic - check for semantically relevant records
+    library_has_data = all(
+        chroma.semantic_search_by_year(query_vector, year) for year in years
+    )
     return {"library_has_data": library_has_data}
 
 
 def fetcher_node(state: AgentState) -> dict:
-    # Placeholder for fetcher logic
-    # In a real implementation, this would call external APIs to fetch data
     domain = state["domain"]
     years = state["years"]
     total_records = 0

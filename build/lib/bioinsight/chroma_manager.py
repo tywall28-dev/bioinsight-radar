@@ -48,16 +48,16 @@ class BioInsightRecord:
 
     # --- Required metadata (7-variable guard) ---
     source: SourceType
-    domain: str                     # e.g. "parkinsons", "autism"
-    year: int                       # publication year or fiscal year
-    pi_name: str                    # lead author or principal investigator
-    org_name: str                   # institution / university
-    external_id: str                # PMID or RePORTER ApplID (string)
-    granularity: GranularityType    # scope of the record
+    domain: str  # e.g. "parkinsons", "autism"
+    year: int  # publication year or fiscal year
+    pi_name: str  # lead author or principal investigator
+    org_name: str  # institution / university
+    external_id: str  # PMID or RePORTER ApplID (string)
+    granularity: GranularityType  # scope of the record
 
     # --- Content fields ---
-    text: str                       # prose to embed
-    title: str = ""                 # human-readable label
+    text: str  # prose to embed
+    title: str = ""  # human-readable label
 
     # --- Populated at ingestion time ---
     embedding: list[float] = field(default_factory=list)
@@ -81,14 +81,14 @@ class BioInsightRecord:
     def metadata_dict(self) -> dict:
         """Return only the 7-variable metadata slice (no text / embedding)."""
         return {
-            "source":      self.source,
-            "domain":      self.domain,
-            "year":        self.year,
-            "pi_name":     self.pi_name,
-            "org_name":    self.org_name,
+            "source": self.source,
+            "domain": self.domain,
+            "year": self.year,
+            "pi_name": self.pi_name,
+            "org_name": self.org_name,
             "external_id": self.external_id,
             "granularity": self.granularity,
-            "title":       self.title,
+            "title": self.title,
         }
 
 
@@ -117,11 +117,13 @@ class BioInsightChromaManager:
         )
         self._collection = self._client.get_or_create_collection(
             name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},   # cosine similarity for BioBERT
+            metadata={"hnsw:space": "cosine"},  # cosine similarity for BioBERT
         )
         logger.info(
             "ChromaDB collection '%s' ready  |  persist_dir=%s  |  count=%d",
-            COLLECTION_NAME, persist_dir, self._collection.count(),
+            COLLECTION_NAME,
+            persist_dir,
+            self._collection.count(),
         )
 
     # ------------------------------------------------------------------ #
@@ -180,6 +182,41 @@ class BioInsightChromaManager:
     # ------------------------------------------------------------------ #
     # Read path
     # ------------------------------------------------------------------ #
+    def get_domain_subset(
+        self,
+        domain: str,
+        years: list[int],
+        source_filter: Optional[str] = None,
+        include_embeddings: bool = True,
+    ) -> dict:
+        """
+        Retrieve a filtered subset of the library for downstream modeling.
+
+        Parameters
+        ----------
+        domain : str
+            e.g. "parkinsons", "autism"
+        years : list[int]
+            Publication years or fiscal years to include.
+        source_filter : str, optional
+            "pubmed", "nih_reporter", or None for both.
+        include_embeddings : bool
+            Set True (default) when passing to UMAP/HDBSCAN.
+            Set False for lightweight metadata inspection.
+        Returns
+        -------
+        dict with keys: ids, documents, metadatas[, embeddings]
+        """
+        filters = {
+            "$and": [
+                {"domain": domain},
+                {"year": {"$in": years}},
+            ]
+        }
+        if source_filter in ("pubmed", "nih_reporter"):
+            filters["$and"].append({"source": source_filter})
+
+        return self.get_subset(filters=filters, include_embeddings=include_embeddings)
 
     def get_subset(
         self,
@@ -258,21 +295,49 @@ class BioInsightChromaManager:
         result = self._collection.get(where=filters, include=[])
         return len(result.get("ids", []))
 
-    def domain_year_exists(self, domain: str, year: int, min_records: int = 10) -> bool:
-        """
-        Quick existence check used by the LangGraph Library Checker Node.
+    def semantic_search_by_year(
+        self,
+        query_vector: list[float],
+        year: int,
+        min_records: int = 10,
+        min_similarity: float = 0.5,
+    ) -> bool:
+        """Check if the library has at least `min_records` relevant to the query vector for a given year.
 
-        Returns True if the library already holds >= min_records for the
-        given domain + year combination, meaning a fetch is NOT needed.
+        Parameters
+        ----------
+        query_vector : list[float]
+            768-D BioBERT embedding of the query.
+        year : int
+            Year to filter records by.
+        min_records : int, default 10
+            Minimum number of relevant records required.
+        min_similarity : float, default 0.5
+            Minimum cosine similarity threshold (0.0 to 1.0). Records with similarity
+            below this threshold are not counted.
         """
-        n = self.count(
-            filters={"$and": [{"domain": domain}, {"year": year}]}
+        filters = {"year": year}
+        # Get more results than needed to account for filtering
+        results = self.semantic_search(
+            query_embedding=query_vector,
+            k=min_records * 2,  # Get more to filter
+            filters=filters,
         )
+
+        # Filter by similarity threshold (cosine distance < 1 - min_similarity)
+        distances = results.get("distances", [[]])[0]
+        max_distance = 1.0 - min_similarity
+        relevant_count = sum(1 for d in distances if d <= max_distance)
+
         logger.info(
-            "Library check: domain=%s year=%d  found=%d  threshold=%d  cached=%s",
-            domain, year, n, min_records, n >= min_records,
+            "Library check: year=%d  found=%d  threshold=%d  meets_threshold=%s  (min_similarity=%.2f)",
+            year,
+            relevant_count,
+            min_records,
+            relevant_count >= min_records,
+            min_similarity,
         )
-        return n >= min_records
+        return relevant_count >= min_records
 
     def list_domains(self) -> list[str]:
         """Return sorted list of all unique domain values in the library."""
@@ -291,9 +356,15 @@ class BioInsightChromaManager:
         for m in metadatas:
             if not m:
                 continue
-            sources[m.get("source", "unknown")] = sources.get(m.get("source", "unknown"), 0) + 1
-            domains[m.get("domain", "unknown")] = domains.get(m.get("domain", "unknown"), 0) + 1
-            years[str(m.get("year", "unknown"))] = years.get(str(m.get("year", "unknown")), 0) + 1
+            sources[m.get("source", "unknown")] = (
+                sources.get(m.get("source", "unknown"), 0) + 1
+            )
+            domains[m.get("domain", "unknown")] = (
+                domains.get(m.get("domain", "unknown"), 0) + 1
+            )
+            years[str(m.get("year", "unknown"))] = (
+                years.get(str(m.get("year", "unknown")), 0) + 1
+            )
         return {
             "total_records": total,
             "by_source": sources,

@@ -295,23 +295,49 @@ class BioInsightChromaManager:
         result = self._collection.get(where=filters, include=[])
         return len(result.get("ids", []))
 
-    def domain_year_exists(self, domain: str, year: int, min_records: int = 10) -> bool:
-        """
-        Quick existence check used by the LangGraph Library Checker Node.
+    def semantic_search_by_year(
+        self,
+        query_vector: list[float],
+        year: int,
+        min_records: int = 10,
+        min_similarity: float = 0.5,
+    ) -> bool:
+        """Check if the library has at least `min_records` relevant to the query vector for a given year.
 
-        Returns True if the library already holds >= min_records for the
-        given domain + year combination, meaning a fetch is NOT needed.
+        Parameters
+        ----------
+        query_vector : list[float]
+            768-D BioBERT embedding of the query.
+        year : int
+            Year to filter records by.
+        min_records : int, default 10
+            Minimum number of relevant records required.
+        min_similarity : float, default 0.5
+            Minimum cosine similarity threshold (0.0 to 1.0). Records with similarity
+            below this threshold are not counted.
         """
-        n = self.count(filters={"$and": [{"domain": domain}, {"year": year}]})
-        logger.info(
-            "Library check: domain=%s year=%d  found=%d  threshold=%d  cached=%s",
-            domain,
-            year,
-            n,
-            min_records,
-            n >= min_records,
+        filters = {"year": year}
+        # Get more results than needed to account for filtering
+        results = self.semantic_search(
+            query_embedding=query_vector,
+            k=min_records * 2,  # Get more to filter
+            filters=filters,
         )
-        return n >= min_records
+
+        # Filter by similarity threshold (cosine distance < 1 - min_similarity)
+        distances = results.get("distances", [[]])[0]
+        max_distance = 1.0 - min_similarity
+        relevant_count = sum(1 for d in distances if d <= max_distance)
+
+        logger.info(
+            "Library check: year=%d  found=%d  threshold=%d  meets_threshold=%s  (min_similarity=%.2f)",
+            year,
+            relevant_count,
+            min_records,
+            relevant_count >= min_records,
+            min_similarity,
+        )
+        return relevant_count >= min_records
 
     def list_domains(self) -> list[str]:
         """Return sorted list of all unique domain values in the library."""

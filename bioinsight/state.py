@@ -4,6 +4,8 @@ from typing import TypedDict, Optional
 class AgentState(TypedDict):
     # User input
     user_query: str
+    enriched_query: Optional[str]  # Enriched query after processing by the router
+    query_vector: Optional[list[float]]  # Vector representation of the user query
 
     # Router outputs
     domain: Optional[str]

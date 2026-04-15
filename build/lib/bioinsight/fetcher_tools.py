@@ -7,7 +7,7 @@ and PubMed (via metapub).
 Design Philosophy:
   - Each fetcher is a pure function decorated with @tool so LangGraph
     can invoke it as a conditional edge from the Library Checker Node.
-  - Fetchers return a list[BioInsightRecord] with embeddings=[] 
+  - Fetchers return a list[BioInsightRecord] with embeddings=[]
     (the EmbeddingService fills those before ChromaDB ingestion).
   - Granularity is inferred from keyword heuristics; callers can override.
   - All network calls are retry-wrapped with exponential back-off to
@@ -33,9 +33,12 @@ from __future__ import annotations
 import logging
 import time
 from typing import Optional
-
+import os
 import requests
 from langchain_core.tools import tool
+from dotenv import load_dotenv
+
+load_dotenv()
 from metapub import PubMedFetcher
 
 from bioinsight.chroma_manager import BioInsightRecord, GranularityType
@@ -48,36 +51,56 @@ logger = logging.getLogger(__name__)
 
 _GRANULARITY_KEYWORDS: dict[GranularityType, list[str]] = {
     "protein": [
-        "protein", "kinase", "receptor", "enzyme", "LRRK2", "MAPK",
-        "alpha-synuclein", "tau", "amyloid", "BDNF", "mTOR",
+        "protein",
+        "kinase",
+        "receptor",
+        "enzyme",
+        "LRRK2",
+        "MAPK",
+        "alpha-synuclein",
+        "tau",
+        "amyloid",
+        "BDNF",
+        "mTOR",
     ],
     "pathway": [
-        "pathway", "signaling", "cascade", "network", "circuit",
-        "mechanism", "axis", "crosstalk", "transduction",
+        "pathway",
+        "signaling",
+        "cascade",
+        "network",
+        "circuit",
+        "mechanism",
+        "axis",
+        "crosstalk",
+        "transduction",
     ],
-    "field": [],   # catch-all
+    "field": [],  # catch-all
 }
 
 
 def _infer_granularity(text: str) -> GranularityType:
     """Heuristic granularity tag from title/abstract text."""
     text_lower = text.lower()
-    for level in ("protein", "pathway"):          # most specific first
+    for level in ("protein", "pathway"):  # most specific first
         if any(kw.lower() in text_lower for kw in _GRANULARITY_KEYWORDS[level]):
             return level
     return "field"
 
 
 def _retry(fn, retries: int = 3, base_delay: float = 2.0):
-    """Simple exponential-back-off wrapper."""
     for attempt in range(retries):
         try:
             return fn()
-        except Exception as exc:                  # noqa: BLE001
+        except Exception as exc:
+            if "Invalid ID" in str(exc):
+                logger.warning("Skipping invalid ID: %s", exc)
+                return None  # skip immediately, don't retry
             if attempt == retries - 1:
                 raise
-            wait = base_delay * (2 ** attempt)
-            logger.warning("Attempt %d failed (%s) — retrying in %.1fs", attempt + 1, exc, wait)
+            wait = base_delay * (2**attempt)
+            logger.warning(
+                "Attempt %d failed (%s) — retrying in %.1fs", attempt + 1, exc, wait
+            )
             time.sleep(wait)
 
 
@@ -86,7 +109,7 @@ def _retry(fn, retries: int = 3, base_delay: float = 2.0):
 # ---------------------------------------------------------------------------
 
 NIH_REPORTER_URL = "https://api.reporter.nih.gov/v2/projects/search"
-NIH_PAGE_SIZE = 500           # max allowed by the API
+NIH_PAGE_SIZE = 500  # max allowed by the API
 
 
 def _nih_reporter_page(
@@ -108,8 +131,11 @@ def _nih_reporter_page(
         "offset": offset,
         "limit": limit,
         "include_fields": [
-            "ApplId", "ProjectTitle", "AbstractText",
-            "PrincipalInvestigators", "OrgName",
+            "ApplId",
+            "ProjectTitle",
+            "AbstractText",
+            "PrincipalInvestigators",
+            "OrgName",
             "FiscalYear",
         ],
     }
@@ -141,12 +167,15 @@ def fetch_nih_reporter(
     offset = 0
     limit = min(NIH_PAGE_SIZE, max_results)
 
-    logger.info("NIH RePORTER fetch  |  domain=%s  year=%d  max=%d", domain, fiscal_year, max_results)
+    logger.info(
+        "NIH RePORTER fetch  |  domain=%s  year=%d  max=%d",
+        domain,
+        fiscal_year,
+        max_results,
+    )
 
     while len(records) < max_results:
-        batch = _retry(
-            lambda: _nih_reporter_page(domain, fiscal_year, offset, limit)
-        )
+        batch = _retry(lambda: _nih_reporter_page(domain, fiscal_year, offset, limit))
         if not batch:
             break
 
@@ -180,15 +209,21 @@ def fetch_nih_reporter(
         fetched_this_page = len(batch)
         offset += fetched_this_page
         if fetched_this_page < limit:
-            break   # last page
+            break  # last page
 
-    logger.info("NIH RePORTER: fetched %d records for domain=%s year=%d", len(records), domain, fiscal_year)
+    logger.info(
+        "NIH RePORTER: fetched %d records for domain=%s year=%d",
+        len(records),
+        domain,
+        fiscal_year,
+    )
     return records[:max_results]
 
 
 # ---------------------------------------------------------------------------
 # Tool 2 — PubMed via metapub
 # ---------------------------------------------------------------------------
+
 
 def _build_pubmed_query(domain: str, query: Optional[str], year: Optional[int]) -> str:
     """Compose an Entrez search string from components."""
@@ -208,7 +243,7 @@ def fetch_pubmed(
     query: Optional[str] = None,
     year: Optional[int] = None,
     max_results: int = 200,
-    email: str = "bioinsight@example.com",    # Entrez etiquette: set to your real email
+    email: str = "bioinsight@example.com",  # Entrez etiquette: set to your real email
 ) -> list[BioInsightRecord]:
     """
     Fetch PubMed abstracts for a given domain or query string.
@@ -226,9 +261,9 @@ def fetch_pubmed(
         List of BioInsightRecord objects with embedding=[] ready for
         EmbeddingService processing.
     """
-    from metapub import PubMedFetcher          # lazy import — keeps startup fast
+    from metapub import PubMedFetcher  # lazy import — keeps startup fast
 
-    fetch = PubMedFetcher(email=email)
+    fetch = PubMedFetcher(email=email, api_key=os.environ.get("NCBI_API_KEY"))
     search_str = _build_pubmed_query(domain, query, year)
 
     logger.info("PubMed fetch  |  query='%s'  max=%d", search_str, max_results)
@@ -246,7 +281,7 @@ def fetch_pubmed(
     for pmid in pmids[:max_results]:
         try:
             article = _retry(lambda: fetch.article_by_pmid(pmid))
-        except Exception as exc:                # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping PMID %s: %s", pmid, exc)
             continue
 
@@ -340,15 +375,17 @@ def embed_records(
         # CLS-token pooling (index 0) gives the sentence-level embedding.
         for vec in batch_vecs:
             if isinstance(vec[0], list):
-                all_embeddings.append(vec[0])   # CLS token
+                all_embeddings.append(vec[0])  # CLS token
             else:
-                all_embeddings.append(vec)      # already pooled
+                all_embeddings.append(vec)  # already pooled
 
         logger.info(
             "Embedded batch %d–%d / %d",
-            i + 1, min(i + batch_size, len(texts)), len(texts),
+            i + 1,
+            min(i + batch_size, len(texts)),
+            len(texts),
         )
-        time.sleep(0.2)   # polite rate limiting
+        time.sleep(0.2)  # polite rate limiting
 
     for rec, emb in zip(records, all_embeddings):
         rec.embedding = emb

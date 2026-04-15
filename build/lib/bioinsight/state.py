@@ -6,6 +6,7 @@ class AgentState(TypedDict):
     user_query: str
     enriched_query: Optional[str]  # Enriched query after processing by the router
     query_vector: Optional[list[float]]  # Vector representation of the user query
+    search_terms: Optional[list]  # Extracted search terms from the query
 
     # Router outputs
     domain: Optional[str]

@@ -9,33 +9,35 @@ from bioinsight.embedder import BioInsightEmbedder
 import umap
 import hdbscan
 import numpy as np
-
+import ast
 
 load_dotenv()
-llm = ChatAnthropic(
-    model="claude-haiku-4-5-20251001",
-    api_key=os.getenv("ANTHROPIC_API_KEY")
-)
+llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
 chroma = BioInsightChromaManager(persist_dir="./bioinsight_db")
 embedder = BioInsightEmbedder(model_name="dmis-lab/biobert-v1.1")
 
 
 def router_node(state: AgentState) -> dict:
     # read from state
-    prompt = f"""You are parsing a biomedical research question that is aiming to pull either pubmed articles or NIH reporter grants. 
-        Your task is to enrish the user query so that it can be embedded and used to query a vector database of biomedical research. You also need to extract the following information from the user query and return it in JSON format:
-    
-        Extract the following and return ONLY valid JSON, no other text:
-        {{
-            "enriched_query": "a rewritten version of the user query that is optimized for embedding and retrieval. It should be more specific not include years or any information that could reduce similarity search efficiency and include relevant keywords.",
-            "domain": "the disease or research area (e.g. parkinsons, autism)",
-            "years": [list of years mentioned or implied],
-            "entity": "the specific entity or concept being researched",
-            "specificity": [1 to 5, where 1 is very broad and 5 is very specific],
-            "source_filter": "pubmed, nih_reporter, both"
-        }}
+    prompt = f"""You are parsing a biomedical research question to query PubMed and NIH Reporter.
 
-        User question: {state["user_query"]}"""
+    Your tasks:
+    1. Enrich the query for vector embedding (no years, just concepts and keywords)
+    2. Extract 2-5 specific biomedical search terms suitable for PubMed/NIH APIs. Example for a Parkinson's LRRK2 query: ["LRRK2", "Parkinson Disease", "kinase inhibitor"] Do not include years. Use proper MeSH terminology.Search terms should be about the BIOMEDICAL TOPIC only — disease names, genes, proteins, mechanisms.  Never include terms about the data source like "grants", "funding", "publications", "research".
+    3. Extract structured metadata
+
+    Return ONLY valid JSON with this exact structure:
+    {{
+        "enriched_query": "...",
+        "search_terms": ["keyword1", "keyword2"],
+        "domain": "...",
+        "years": [...],
+        "entity": "...",
+        "specificity": 1-5,
+        "source_filter": "pubmed|nih_reporter|both"
+    }}
+
+    User question: {state["user_query"]}"""
 
     response = llm.invoke(prompt)
     content = response.content.strip()
@@ -46,23 +48,7 @@ def router_node(state: AgentState) -> dict:
             content = content[4:]
     content = content.strip()
     parsed = json.loads(content)
-    print(f"DEBUG Router output: {parsed}")  # add this
-
-    DOMAIN_MAP = {
-        "parkinson's disease": "parkinsons",
-        "parkinson disease": "parkinsons",
-        "parkinsons disease": "parkinsons",
-        "alzheimer's disease": "alzheimers",
-        "alzheimer disease": "alzheimers",
-        "autistic disorder": "autism",
-        "autism spectrum disorder": "autism",
-        "amyotrophic lateral sclerosis": "als",
-        "als": "als",
-        "lou gehrig's disease": "als",
-    }
-
-    domain = parsed["domain"].lower()
-    domain = DOMAIN_MAP.get(domain, domain)
+    print(f"DEBUG full parsed output: {json.dumps(parsed, indent=2)}")
 
     # Generate query embedding
     try:
@@ -74,48 +60,79 @@ def router_node(state: AgentState) -> dict:
         print(f"ERROR: Failed to embed query: {e}")
         # Fallback: use a zero vector or skip embedding for now
         query_vector = [0.0] * 768
-
-    return {
+    print(f"DEBUG router returning search_terms: {parsed.get('search_terms', [])}")
+    return_dict = {
         "query_vector": query_vector,
+        "search_terms": str(parsed.get("search_terms", [])),
         "enriched_query": parsed["enriched_query"],
-        "domain": domain,
+        "domain": parsed["domain"],
         "years": parsed["years"],
         "entity": parsed.get("entity"),
         "specificity": parsed["specificity"],
         "source_filter": parsed["source_filter"],
     }
+    print(f"DEBUG router return dict: {return_dict.keys()}")
+    print(f"DEBUG router search_terms in return: {return_dict.get('search_terms')}")
+    return return_dict
 
 
 def library_checker_node(state: AgentState) -> dict:
-    # read parameters from state
+    print(f"DEBUG library_checker search_terms: {state.get('search_terms')}")
     years = state["years"]
     query_vector = state.get("query_vector")
+    specificity = state.get("specificity", 3)
+    min_similarity = 0.3 + (specificity * 0.1)
 
-    # call library checker logic - check for semantically relevant records
+    if specificity >= 4 and state.get("fetch_attempts", 0) == 0:
+        return {"library_has_data": False}
+
     library_has_data = all(
-        chroma.semantic_search_by_year(query_vector, year) for year in years
+        chroma.semantic_search_by_year(
+            query_vector, year, min_similarity=min_similarity
+        )
+        for year in years
     )
     return {"library_has_data": library_has_data}
 
 
 def fetcher_node(state: AgentState) -> dict:
-    domain = state["domain"]
+    search_terms = state.get("search_terms", [])
+    if isinstance(search_terms, str):
+        import ast
+
+        try:
+            search_terms = ast.literal_eval(search_terms)
+        except:
+            search_terms = []
+
+    if search_terms:
+        main_term = search_terms[0]
+        other_terms = " OR ".join(search_terms[1:])
+        search_query = f"{main_term} AND ({other_terms})" if other_terms else main_term
+    else:
+        search_query = state.get("enriched_query", "")
+    print(f"DEBUG fetcher search_terms: {state.get('search_terms')}")
+    print(f"DEBUG fetcher search_query: {search_query}")
     years = state["years"]
+    source_filter = state.get("source_filter")
     total_records = 0
-
+    print(f"DEBUG fetcher search_query: {search_query}")
     for year in years:
-        # Fetch new records from PubMed and NIH Reporter
-        pubmed_records = fetch_pubmed.invoke(
-            {"domain": domain, "year": year, "max_results": 100}
-        )
+        all_records = []
 
-        nih_records = fetch_nih_reporter.invoke(
-            {"domain": domain, "fiscal_year": year, "max_results": 100}
-        )
+        if source_filter in ("pubmed", "both", None):
+            pubmed_records = fetch_pubmed.invoke(
+                {"domain": search_query, "year": year, "max_results": 100}
+            )
+            all_records += pubmed_records
 
-        all_records = pubmed_records + nih_records
+        if source_filter in ("nih_reporter", "both", None):
+            nih_records = fetch_nih_reporter.invoke(
+                {"domain": search_query, "fiscal_year": year, "max_results": 100}
+            )
+            all_records += nih_records
+
         total_records += len(all_records)
-        # Embed and upsert into ChromaDB
         embedded_records = embedder.embed_records(all_records)
         chroma.upsert_records(embedded_records)
 
@@ -126,14 +143,23 @@ def fetcher_node(state: AgentState) -> dict:
 
 
 def subset_modeler_node(state: AgentState) -> dict:
-    domain = state["domain"]
+    query_vector = state.get("query_vector")
     years = state["years"]
     source_filter = state.get("source_filter")
-    results = chroma.get_domain_subset(domain, years, source_filter)
-    if results["embeddings"] is None or len(results["embeddings"]) == 0:
+    specificity = state.get("specificity", 3)
+    k = max(50, 500 - (specificity - 1) * 100)
+
+    year_filter = {"year": {"$in": years}}
+    if source_filter in ("pubmed", "nih_reporter"):
+        filters = {"$and": [{"year": {"$in": years}}, {"source": source_filter}]}
+    else:
+        filters = year_filter
+
+    results = chroma.semantic_search(query_vector, k=k, filters=filters)
+    if not results.get("documents") or len(results["documents"][0]) == 0:
         return {"clusters": {}, "error": "No records found for this query."}
 
-    embeddings_matrix = np.array(results["embeddings"])
+    embeddings_matrix = np.array(results["embeddings"][0])
     umap_embeddings = umap.UMAP(
         n_neighbors=15, min_dist=0.1, n_components=5
     ).fit_transform(embeddings_matrix)
@@ -141,7 +167,7 @@ def subset_modeler_node(state: AgentState) -> dict:
     cluster_labels = clusterer.fit_predict(umap_embeddings)
 
     clusters = {}
-    for label, document in zip(cluster_labels, results["documents"]):
+    for label, document in zip(cluster_labels, results["documents"][0]):
         label = int(label)
         if label not in clusters:
             clusters[label] = []
@@ -151,20 +177,18 @@ def subset_modeler_node(state: AgentState) -> dict:
 
 
 def synthesis_node(state: AgentState) -> dict:
-    domain = state["domain"]
+    enriched_query = state.get("enriched_query", state.get("domain", ""))
     years = state["years"]
     source_filter = state.get("source_filter")
     clusters = state.get("clusters", {})
     specificity = state.get("specificity")
     cluster_summaries = {
-        label: docs[:6]
-        for label, docs in clusters.items()
-        if label != -1  # skip noise cluster
+        label: docs[:6] for label, docs in clusters.items() if label != -1
     }
 
     prompt = f"""You are a biomedical research analyst writing a report for a program officer.
 
-        Domain: {domain}
+        Query: {enriched_query}
         Years: {years}
         Source: {source_filter}
         Specificity: {specificity}

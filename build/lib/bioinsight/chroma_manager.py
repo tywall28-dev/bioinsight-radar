@@ -275,7 +275,7 @@ class BioInsightChromaManager:
         kwargs: dict = {
             "query_embeddings": [query_embedding],
             "n_results": k,
-            "include": ["documents", "metadatas", "distances"],
+            "include": ["documents", "metadatas", "distances", "embeddings"],
         }
         if filters:
             kwargs["where"] = filters

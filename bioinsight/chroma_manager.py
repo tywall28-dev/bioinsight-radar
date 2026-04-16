@@ -299,45 +299,35 @@ class BioInsightChromaManager:
         self,
         query_vector: list[float],
         year: int,
-        min_records: int = 10,
+        min_records: int = 5,
         min_similarity: float = 0.5,
     ) -> bool:
-        """Check if the library has at least `min_records` relevant to the query vector for a given year.
-
-        Parameters
-        ----------
-        query_vector : list[float]
-            768-D BioBERT embedding of the query.
-        year : int
-            Year to filter records by.
-        min_records : int, default 10
-            Minimum number of relevant records required.
-        min_similarity : float, default 0.5
-            Minimum cosine similarity threshold (0.0 to 1.0). Records with similarity
-            below this threshold are not counted.
-        """
         filters = {"year": year}
-        # Get more results than needed to account for filtering
         results = self.semantic_search(
             query_embedding=query_vector,
-            k=min_records * 2,  # Get more to filter
+            k=min_records * 2,
             filters=filters,
         )
 
-        # Filter by similarity threshold (cosine distance < 1 - min_similarity)
         distances = results.get("distances", [[]])[0]
-        max_distance = 1.0 - min_similarity
-        relevant_count = sum(1 for d in distances if d <= max_distance)
+        if not distances:
+            return False
+
+        # Check AVERAGE similarity of top results, not just count above threshold
+        similarities = [1 - d for d in distances]
+        avg_similarity = sum(similarities) / len(similarities)
+        high_quality = sum(1 for s in similarities if s >= min_similarity)
 
         logger.info(
-            "Library check: year=%d  found=%d  threshold=%d  meets_threshold=%s  (min_similarity=%.2f)",
+            "Library check: year=%d avg_similarity=%.2f high_quality=%d threshold=%d meets=%s",
             year,
-            relevant_count,
+            avg_similarity,
+            high_quality,
             min_records,
-            relevant_count >= min_records,
-            min_similarity,
+            avg_similarity >= min_similarity and high_quality >= min_records,
         )
-        return relevant_count >= min_records
+
+        return avg_similarity >= min_similarity and high_quality >= min_records
 
     def list_domains(self) -> list[str]:
         """Return sorted list of all unique domain values in the library."""

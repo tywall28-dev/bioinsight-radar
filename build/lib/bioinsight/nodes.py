@@ -72,16 +72,14 @@ def router_node(state: AgentState) -> dict:
         "source_filter": parsed["source_filter"],
     }
     print(f"DEBUG router return dict: {return_dict.keys()}")
-    print(f"DEBUG router search_terms in return: {return_dict.get('search_terms')}")
     return return_dict
 
 
 def library_checker_node(state: AgentState) -> dict:
-    print(f"DEBUG library_checker search_terms: {state.get('search_terms')}")
     years = state["years"]
     query_vector = state.get("query_vector")
     specificity = state.get("specificity", 3)
-    min_similarity = 0.3 + (specificity * 0.1)
+    min_similarity = 0.2 + (specificity * 0.08)
 
     if specificity >= 4 and state.get("fetch_attempts", 0) == 0:
         return {"library_has_data": False}
@@ -92,6 +90,9 @@ def library_checker_node(state: AgentState) -> dict:
         )
         for year in years
     )
+    total = chroma.count()
+    print(f"DEBUG library_checker: total records in DB: {total}")
+    print(f"DEBUG library_checker: min_similarity: {min_similarity}")
     return {"library_has_data": library_has_data}
 
 
@@ -108,27 +109,28 @@ def fetcher_node(state: AgentState) -> dict:
     if search_terms:
         main_term = search_terms[0]
         other_terms = " OR ".join(search_terms[1:])
-        search_query = f"{main_term} AND ({other_terms})" if other_terms else main_term
+        pubmed_query = f"{main_term} AND ({other_terms})" if other_terms else main_term
+        nih_query = search_terms[0]
     else:
-        search_query = state.get("enriched_query", "")
-    print(f"DEBUG fetcher search_terms: {state.get('search_terms')}")
-    print(f"DEBUG fetcher search_query: {search_query}")
+        pubmed_query = state.get("enriched_query", "")
+        nih_query = state.get("enriched_query", "")
+
     years = state["years"]
     source_filter = state.get("source_filter")
     total_records = 0
-    print(f"DEBUG fetcher search_query: {search_query}")
+
     for year in years:
         all_records = []
 
         if source_filter in ("pubmed", "both", None):
             pubmed_records = fetch_pubmed.invoke(
-                {"domain": search_query, "year": year, "max_results": 100}
+                {"domain": pubmed_query, "year": year, "max_results": 100}
             )
             all_records += pubmed_records
 
         if source_filter in ("nih_reporter", "both", None):
             nih_records = fetch_nih_reporter.invoke(
-                {"domain": search_query, "fiscal_year": year, "max_results": 100}
+                {"domain": nih_query, "fiscal_year": year, "max_results": 100}
             )
             all_records += nih_records
 

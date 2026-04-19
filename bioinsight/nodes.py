@@ -12,7 +12,8 @@ import numpy as np
 import ast
 
 load_dotenv()
-llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
+llm = ChatAnthropic(model="claude-haiku-4-5-20251001")  # fast, for routing
+synthesis_llm = ChatAnthropic(model="claude-sonnet-4-6")  # powerful, for reports
 chroma = BioInsightChromaManager(persist_dir="./bioinsight_db")
 embedder = BioInsightEmbedder(model_name="dmis-lab/biobert-v1.1")
 
@@ -53,9 +54,6 @@ def router_node(state: AgentState) -> dict:
     # Generate query embedding
     try:
         query_vector = embedder.embed_query(parsed["enriched_query"])
-        print(
-            f"DEBUG: Query vector generated successfully: {query_vector[:5]}..."
-        )  # add this
     except Exception as e:
         print(f"ERROR: Failed to embed query: {e}")
         # Fallback: use a zero vector or skip embedding for now
@@ -63,7 +61,7 @@ def router_node(state: AgentState) -> dict:
     print(f"DEBUG router returning search_terms: {parsed.get('search_terms', [])}")
     return_dict = {
         "query_vector": query_vector,
-        "search_terms": str(parsed.get("search_terms", [])),
+        "search_terms": parsed.get("search_terms", []),
         "enriched_query": parsed["enriched_query"],
         "domain": parsed["domain"],
         "years": parsed["years"],
@@ -80,6 +78,8 @@ def library_checker_node(state: AgentState) -> dict:
     query_vector = state.get("query_vector")
     specificity = state.get("specificity", 3)
     min_similarity = 0.2 + (specificity * 0.08)
+    print(f"DEBUG search_terms type: {type(state.get('search_terms'))}")
+    print(f"DEBUG search_terms value: {state.get('search_terms')}")
 
     if specificity >= 4 and state.get("fetch_attempts", 0) == 0:
         return {"library_has_data": False}
@@ -98,13 +98,6 @@ def library_checker_node(state: AgentState) -> dict:
 
 def fetcher_node(state: AgentState) -> dict:
     search_terms = state.get("search_terms", [])
-    if isinstance(search_terms, str):
-        import ast
-
-        try:
-            search_terms = ast.literal_eval(search_terms)
-        except:
-            search_terms = []
 
     if search_terms:
         main_term = search_terms[0]
@@ -169,11 +162,17 @@ def subset_modeler_node(state: AgentState) -> dict:
     cluster_labels = clusterer.fit_predict(umap_embeddings)
 
     clusters = {}
-    for label, document in zip(cluster_labels, results["documents"][0]):
+    for i, (label, document) in enumerate(zip(cluster_labels, results["documents"][0])):
         label = int(label)
         if label not in clusters:
             clusters[label] = []
-        clusters[label].append(document)
+        clusters[label].append(
+            {
+                "id": results["ids"][0][i],
+                "text": document,
+                "metadata": results["metadatas"][0][i],
+            }
+        )
 
     return {"clusters": clusters}
 
@@ -184,27 +183,47 @@ def synthesis_node(state: AgentState) -> dict:
     source_filter = state.get("source_filter")
     clusters = state.get("clusters", {})
     specificity = state.get("specificity")
-    cluster_summaries = {
-        label: docs[:6] for label, docs in clusters.items() if label != -1
-    }
 
-    prompt = f"""You are a biomedical research analyst writing a report for a program officer.
+    # Pass 1: Summarize each cluster with Haiku
+    cluster_summaries = {}
+    for label, docs in clusters.items():
+        if label == -1:
+            continue
+        docs_text = "\n\n".join([doc["text"][:800] for doc in docs[:10]])
+        summary_prompt = f"""Summarize the following biomedical research abstracts in 3-4 sentences.
+Focus on: what is being studied, key findings, and therapeutic implications.
 
-        Query: {enriched_query}
-        Years: {years}
-        Source: {source_filter}
-        Specificity: {specificity}
+Abstracts:
+{docs_text}"""
+        summary = llm.invoke(summary_prompt)
+        cluster_summaries[label] = summary.content
 
-        Research clusters identified:
-        {json.dumps(cluster_summaries, indent=2)}
+    # Pass 2: Synthesize all cluster summaries with Sonnet
+    synthesis_prompt = f"""You are a biomedical research analyst writing a report for a program officer.
 
-        Write a structured report with these sections:
-        1. Overview
-        2. Major Research Themes (one per cluster)
-        3. White Space / Gaps
-        4. Rising Signals"""
+Query: {enriched_query}
+Years: {years}
+Source: {source_filter}
+Specificity: {specificity}
 
-    response = llm.invoke(prompt)
-    # Placeholder for synthesis logic
-    # In a real implementation, this would take the clustered data and generate a final answer
+Research cluster summaries ({len(cluster_summaries)} clusters identified):
+{json.dumps(cluster_summaries, indent=2)}
+
+Write a structured report with these sections:
+1. Overview
+2. Major Research Themes (one per cluster)
+3. White Space / Gaps
+4. Rising Signals"""
+
+    response = synthesis_llm.invoke(synthesis_prompt)
     return {"final_answer": response.content}
+
+
+def error_node(state: AgentState) -> dict:
+    attempts = state.get("fetch_attempts", 0)
+    search_terms = state.get("search_terms", [])
+    return {
+        "final_answer": f"Could not find sufficient relevant data after {attempts} fetch attempts. "
+        f"Search terms used: {search_terms}. "
+        f"Try broadening your query, using different terminology, or expanding the date range."
+    }

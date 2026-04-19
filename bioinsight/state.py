@@ -1,4 +1,4 @@
-from typing import TypedDict, Optional
+from typing import Optional, TypedDict, Annotated
 
 
 class AgentState(TypedDict):
@@ -6,7 +6,7 @@ class AgentState(TypedDict):
     user_query: str
     enriched_query: Optional[str]  # Enriched query after processing by the router
     query_vector: Optional[list[float]]  # Vector representation of the user query
-    search_terms: Optional[list]  # Extracted search terms from the query
+    search_terms: Annotated[Optional[list], lambda x, y: y if y is not None else x]
 
     # Router outputs
     domain: Optional[str]
@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     clusters: Optional[list]
 
     # Synthesis outputs
+    report_sidecar: Optional[str]
     final_answer: Optional[str]
 
     # Error tracking

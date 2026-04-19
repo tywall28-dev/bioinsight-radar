@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import json
 import uuid
 from bioinsight.graph import app
 
@@ -31,5 +32,10 @@ if clusters:
     print(f"Cluster {first_label} first record:")
     print(clusters[first_label][0])
 
-state = app.get_state(config)
-print(state.values.get("final_answer", state.values.get("error", "No output")))
+print(state.values.get("final_answer", "No report"))
+print("\n--- SIDECAR ---")
+sidecar = state.values.get("report_sidecar")
+if sidecar:
+    data = json.loads(sidecar)
+    print(f"Clusters: {len(data['cluster_findings'])}")
+    print(f"Evidence entries: {len(data['evidence_index'])}")

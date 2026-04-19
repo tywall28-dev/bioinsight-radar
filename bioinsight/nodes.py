@@ -9,7 +9,6 @@ from bioinsight.embedder import BioInsightEmbedder
 import umap
 import hdbscan
 import numpy as np
-import ast
 
 load_dotenv()
 llm = ChatAnthropic(model="claude-haiku-4-5-20251001")  # fast, for routing
@@ -186,7 +185,10 @@ def synthesis_node(state: AgentState) -> dict:
 
     # Pass 1: Summarize each cluster with Haiku
     cluster_summaries = {}
-    for label, docs in clusters.items():
+    cluster_items = list(clusters.items())[
+        :2
+    ]  # Limit to 5 clusters for synthesis REMOVE THIS LATER for testing only
+    for label, docs in cluster_items:
         if label == -1:
             continue
         docs_text = "\n\n".join([doc["text"][:800] for doc in docs[:10]])

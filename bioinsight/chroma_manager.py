@@ -75,8 +75,7 @@ class BioInsightRecord:
             raise ValueError("text field must contain embeddable prose.")
 
     def chroma_id(self) -> str:
-        """Stable, unique Chroma document ID."""
-        return f"{self.source}__{self.external_id}"
+        return self.external_id
 
     def metadata_dict(self) -> dict:
         """Return only the 7-variable metadata slice (no text / embedding)."""

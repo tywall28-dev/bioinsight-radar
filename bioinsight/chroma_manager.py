@@ -58,7 +58,8 @@ class BioInsightRecord:
     # --- Content fields ---
     text: str  # prose to embed
     title: str = ""  # human-readable label
-
+    pub_type: str = "unknown"  # e.g. "journal_article", "review", "letter", "editorial"
+    mesh_terms: str = ""  # pipe-separated MeSH headings (PubMed only, empty for NIH)
     # --- Populated at ingestion time ---
     embedding: list[float] = field(default_factory=list)
 
@@ -78,7 +79,6 @@ class BioInsightRecord:
         return self.external_id
 
     def metadata_dict(self) -> dict:
-        """Return only the 7-variable metadata slice (no text / embedding)."""
         return {
             "source": self.source,
             "domain": self.domain,
@@ -88,6 +88,7 @@ class BioInsightRecord:
             "external_id": self.external_id,
             "granularity": self.granularity,
             "title": self.title,
+            "mesh_terms": self.mesh_terms,
         }
 
 
@@ -298,35 +299,43 @@ class BioInsightChromaManager:
         self,
         query_vector: list[float],
         year: int,
-        min_records: int = 5,
+        min_records: int = 50,
         min_similarity: float = 0.5,
     ) -> bool:
         filters = {"year": year}
         results = self.semantic_search(
             query_embedding=query_vector,
-            k=min_records * 2,
+            k=min_records * 20,  # fetch more to account for sentence inflation
             filters=filters,
         )
 
         distances = results.get("distances", [[]])[0]
+        ids = results.get("ids", [[]])[0]
+
         if not distances:
             return False
 
-        # Check AVERAGE similarity of top results, not just count above threshold
-        similarities = [1 - d for d in distances]
-        avg_similarity = sum(similarities) / len(similarities)
-        high_quality = sum(1 for s in similarities if s >= min_similarity)
+        # Deduplicate by parent document
+        parent_ids = set()
+        for id, dist in zip(ids, distances):
+            similarity = 1 - dist
+            if similarity >= min_similarity:
+                parent_id = id.rsplit("__s", 1)[0]
+                parent_ids.add(parent_id)
+
+        unique_docs = len(parent_ids)
 
         logger.info(
-            "Library check: year=%d avg_similarity=%.2f high_quality=%d threshold=%d meets=%s",
+            "Library check: year=%d unique_docs=%d threshold=%d meets=%s",
             year,
-            avg_similarity,
-            high_quality,
+            unique_docs,
             min_records,
-            avg_similarity >= min_similarity and high_quality >= min_records,
+            unique_docs >= min_records,
         )
-
-        return avg_similarity >= min_similarity and high_quality >= min_records
+        print(
+            f"Library check: year={year} unique_docs={unique_docs} meets={unique_docs >= min_records}"
+        )
+        return unique_docs >= min_records
 
     def list_domains(self) -> list[str]:
         """Return sorted list of all unique domain values in the library."""

@@ -154,7 +154,7 @@ def _nih_reporter_page(
 def fetch_nih_reporter(
     domain: str,
     fiscal_year: int,
-    max_results: int = 500,
+    max_results: int = 1000,
 ) -> list[BioInsightRecord]:
     """
     Fetch NIH RePORTER grants for a given domain and fiscal year.
@@ -174,10 +174,9 @@ def fetch_nih_reporter(
     limit = min(NIH_PAGE_SIZE, max_results)
 
     logger.info(
-        "NIH RePORTER fetch  |  domain=%s  year=%d  max=%d",
+        "NIH RePORTER fetch  |  domain=%s  year=%d",
         domain,
         fiscal_year,
-        max_results,
     )
 
     while len(records) < max_results:
@@ -231,7 +230,7 @@ def fetch_nih_reporter(
         domain,
         fiscal_year,
     )
-    return records[:max_results]
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -255,28 +254,30 @@ def fetch_pubmed(
     domain: str,
     query: Optional[str] = None,
     year: Optional[int] = None,
-    max_results: int = 200,
+    max_results: int = 500,
     email: str = "bioinsight@example.com",
 ) -> list[BioInsightRecord]:
     """
     Fetch PubMed abstracts for a given domain or query string.
     Each abstract is split into sentence-level passages at ingest.
+    max_results controls how many abstracts to fetch (not passages).
 
     Args:
         domain: Disease / research area keyword.
         query: Optional explicit Entrez query (overrides domain-only search).
         year: Optional publication year filter (e.g. 2024).
-        max_results: Upper bound on records returned (default 200).
+        max_results: Upper bound on abstracts fetched (default 500).
         email: Email for NCBI rate-limit courtesy header.
 
     Returns:
-        List of BioInsightRecord objects with embedding=[] ready for
-        EmbeddingService processing.
+        List of sentence-level BioInsightRecord objects with embedding=[].
     """
     fetch = PubMedFetcher(email=email, api_key=os.environ.get("NCBI_API_KEY"))
     search_str = _build_pubmed_query(domain, query, year)
 
-    logger.info("PubMed fetch  |  query='%s'  max=%d", search_str, max_results)
+    logger.info(
+        "PubMed fetch  |  query='%s'  max_abstracts=%d", search_str, max_results
+    )
 
     pmids: list[str] = _retry(
         lambda: fetch.pmids_for_query(search_str, retmax=max_results)
@@ -288,7 +289,7 @@ def fetch_pubmed(
 
     records: list[BioInsightRecord] = []
 
-    for pmid in pmids[:max_results]:
+    for pmid in pmids:
         try:
             article = _retry(lambda: fetch.article_by_pmid(pmid))
         except Exception as exc:
@@ -315,6 +316,25 @@ def fetch_pubmed(
         pi_name = authors[0] if authors else "Unknown Author"
         journal = article.journal or "Unknown Journal"
 
+        # Extract publication type
+        pub_types = article.publication_types or []
+        pub_type = (
+            "review"
+            if any("review" in pt.lower() for pt in pub_types)
+            else (
+                "letter"
+                if any("letter" in pt.lower() for pt in pub_types)
+                else (
+                    "editorial"
+                    if any("editorial" in pt.lower() for pt in pub_types)
+                    else "journal_article"
+                )
+            )
+        )
+
+        raw_mesh = getattr(article, "mesh_headings", None) or []
+        mesh_terms = "|".join(str(t) for t in raw_mesh if t)
+
         passages = split_into_passages(
             text=text,
             parent_id=str(pmid),
@@ -333,12 +353,15 @@ def fetch_pubmed(
                     granularity=_infer_granularity(passage["text"]),
                     text=passage["text"],
                     title=title,
+                    pub_type=pub_type,
+                    mesh_terms=mesh_terms,
                 )
             )
 
     logger.info(
-        "PubMed: fetched %d passage records for query='%s'",
+        "PubMed: fetched %d passage records from %d abstracts for query='%s'",
         len(records),
+        len(pmids),
         search_str,
     )
     return records

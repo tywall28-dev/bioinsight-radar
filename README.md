@@ -9,7 +9,7 @@
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
 
-BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report, pulling from PubMed literature and NIH-funded grants, clustering findings by topic, verifying every claim against its source, and producing an annotated Word document with inline citations.
+BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report. It pulls from PubMed literature and NIH-funded grants, clusters findings by topic, verifies every claim against its source, and produces an annotated Word document with inline citations. Because the pipeline relies on large language models, verification is probabilistic rather than absolute, but source-level citation allows readers to confirm each claim independently.
 
 ---
 

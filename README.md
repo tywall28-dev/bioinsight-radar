@@ -1,16 +1,27 @@
-# 🔬 BioInsight Radar
+
+
+
+
+
+
+
+# BioInsight Radar
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
 
+<<<<<<< HEAD
 BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report. It pulls from PubMed literature and NIH-funded grants, clusters findings by topic, verifies every claim against its source, and produces an annotated Word document with inline citations.
 
 > **Note on hardware:** Embeddings currently run locally using BioBERT via PyTorch. A GPU is strongly recommended for reasonable ingestion speed. CPU will work but is significantly slower, especially on larger fetch modes.
+=======
+BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report. It pulls from PubMed literature and NIH-funded grants, clusters findings by topic, verifies every claim against its source, and produces an annotated Word document with inline citations. Because the pipeline relies on large language models, verification is probabilistic rather than absolute, but source-level citation allows readers to confirm each claim independently.
+>>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5
 
 ---
 
 ## Demo
 
-<!-- Drop your demo video / GIF / screenshot here -->
+<video src ="https://github.com/user-attachments/assets/509737c2-5ede-4e96-a136-f84ec0fac03a" width = "600" controls></video>
 
 ---
 
@@ -23,9 +34,15 @@ You type a question like:
 BioInsight Radar:
 
 1. **Parses and refines** your question into structured search terms, separating what you explicitly asked about from what it should broaden to cover
+<<<<<<< HEAD
 2. **Checks a persistent local library** and skips fetching if enough relevant data already exists
 3. **Fetches from PubMed and NIH Reporter** with configurable depth (150 to 3,000 docs/year/source)
 4. **Shows a preliminary overview and data coverage panel** so you can decide whether to run the full analysis or pull more data before committing
+=======
+2. **Checks a persistent local library** if relevant data already exists, fetching is skipped
+3. **Fetches from PubMed and NIH Reporter** with configurable depth (150–3,000 docs/year/source)
+4. **Shows a preliminary overview and data coverage panel** so you can decide whether to run the full analysis or fetch more before committing
+>>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5
 5. **Clusters the corpus** with UMAP + HDBSCAN on 768-D BioBERT embeddings to find thematic groups without predefining categories
 6. **Extracts and verifies findings** where each claim passes two independent gates: factually stated in the source, and directly relevant to your question
 7. **Writes a structured report** with inline citations, entity tables, research gaps, and strategic commentary
@@ -35,12 +52,21 @@ BioInsight Radar:
 
 ## Key Features
 
+<<<<<<< HEAD
 - **Human-in-the-loop checkpoint** so you see a preliminary overview and data assessment before the full analysis runs, with the option to fetch more data targeting specific gaps
 - **Persistent vector library** using ChromaDB to store BioBERT embeddings on disk so repeat queries on the same topic reuse ingested data without re-fetching
 - **Sentence-level provenance** where each abstract and grant is split into sentence passages at ingest and citations trace back to the exact source document
 - **Dual-source analysis** that queries PubMed (published findings) and NIH Reporter (active grant funding) independently or together, with the report separating "what research shows" from "where funding is going"
 - **Configurable fetch depth** across Quick (~150 docs/yr), Standard (~400), Deep (~800), and Everything (all available, cap 3,000)
 - **Structured verification** where every extracted claim is independently checked for factual grounding and query relevance before it appears in the report
+=======
+- **Human-in-the-loop checkpoint** you see a preliminary overview and data assessment before the full analysis runs, with the option to fetch more data targeting specific gaps
+- **Persistent vector library** ChromaDB stores BioBERT embeddings on disk; repeat queries on the same topic reuse ingested data without re-fetching
+- **Sentence-level provenance** each abstract and grant is split into sentence passages at ingest; citations trace back to the exact source document
+- **Dual-source analysis** query PubMed (published findings) and NIH Reporter (active grant funding) independently or together; the report separates "what research shows" from "where funding is going"
+- **Configurable fetch depth** Quick (~150 docs/yr), Standard (~400), Deep (~800), Everything (all available, cap 3,000)
+- **Structured verification** every extracted claim is independently checked for factual grounding and query relevance before it appears in the report
+>>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5
 
 ---
 
@@ -169,10 +195,17 @@ The ChromaDB library is created at `./bioinsight_db/` on first run and persists 
 
 **Choose fetch depth** in the sidebar before querying. Standard is a good starting point; use Deep or Everything for thorough analysis.
 
+<<<<<<< HEAD
 **Review the preliminary overview.** The app pauses here and shows you a coverage breakdown panel with document counts by year and source, top terms, and query coverage. You can:
 - **Run Full Analysis** to proceed to clustering, extraction, and report writing
 - **Fetch More** to target gaps the assessor identified with additional search terms
 - **New Query** to start over
+=======
+**Review the preliminary overview**: the app pauses here and shows you a coverage breakdown panel (document counts by year and source, top terms, query coverage). You can:
+- **Run Full Analysis**: proceeds to clustering, extraction, and report writing
+- **Fetch More**: targets gaps the assessor identified with additional search terms
+- **New Query**: start over
+>>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5
 
 **Download the `.docx`** from the final report. Every citation is a clickable link back to the original PubMed abstract or NIH Reporter grant page.
 
@@ -209,7 +242,11 @@ bioinsight-radar/
 | Deep | ~800 | Thorough analysis of emerging areas |
 | Everything | All available (cap 3,000) | Complete corpus coverage |
 
+<<<<<<< HEAD
 Availability is checked before each fetch. If fewer records exist for a year or source, the full available set is used automatically.
+=======
+Availability is checked before each fetch, if fewer records exist for a year/source, the full available set is used automatically.
+>>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5
 
 ---
 
@@ -217,8 +254,13 @@ Availability is checked before each fetch. If fewer records exist for a year or 
 
 Every extracted finding passes two independent gates before it appears in the report:
 
+<<<<<<< HEAD
 1. **Factual support** - is this claim explicitly stated as an established result in the source document? Research aims, hypotheses, and background statements are rejected.
 2. **Query relevance** - does this claim directly address what you asked? Methodological details and tangential findings are rejected.
+=======
+1. **Factual support** is this claim explicitly stated as an established result in the source document? Research aims, hypotheses, and background statements are rejected.
+2. **Query relevance** does this claim directly address what you asked? Methodological details and tangential findings are rejected.
+>>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5
 
 Both gates must pass. Claims that fail either one are dropped and logged with a reason.
 

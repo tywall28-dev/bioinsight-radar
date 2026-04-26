@@ -1,6 +1,10 @@
 
 
 
+
+
+
+
 # BioInsight Radar
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
@@ -11,7 +15,7 @@ BioInsight Radar is an agentic pipeline that turns a natural-language research q
 
 ## Demo
 
-<!-- Drop your demo video / GIF / screenshot here -->
+<video src ="https://github.com/user-attachments/assets/509737c2-5ede-4e96-a136-f84ec0fac03a" width = "600" controls></video>
 
 ---
 

@@ -7,7 +7,12 @@ from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from bioinsight.state import AgentState
 from bioinsight.chroma_manager import BioInsightChromaManager
-from bioinsight.fetcher_tools import fetch_pubmed, fetch_nih_reporter
+from bioinsight.fetcher_tools import (
+    fetch_pubmed,
+    fetch_nih_reporter,
+    count_pubmed,
+    count_nih_reporter,
+)
 from bioinsight.embedder import BioInsightEmbedder
 import umap
 import hdbscan
@@ -35,11 +40,74 @@ embedder = BioInsightEmbedder(model_name="dmis-lab/biobert-v1.1")
 
 
 _TERM_STOPWORDS = {
-    "the", "a", "an", "of", "in", "and", "or", "for", "to", "with", "by",
-    "on", "is", "are", "that", "this", "from", "at", "as", "its", "into",
-    "via", "role", "using", "based", "study", "studies", "research", "new",
-    "analysis", "effects", "effect", "related", "associated", "between",
+    "the",
+    "a",
+    "an",
+    "of",
+    "in",
+    "and",
+    "or",
+    "for",
+    "to",
+    "with",
+    "by",
+    "on",
+    "is",
+    "are",
+    "that",
+    "this",
+    "from",
+    "at",
+    "as",
+    "its",
+    "into",
+    "via",
+    "role",
+    "using",
+    "based",
+    "study",
+    "studies",
+    "research",
+    "new",
+    "analysis",
+    "effects",
+    "effect",
+    "related",
+    "associated",
+    "between",
 }
+
+
+# Words that describe the query format, not biomedical content.
+# Applied in code after both router and refiner to ensure they never end up
+# as search terms that get ANDed into API queries.
+_QUERY_META_WORDS = frozenset({
+    # Single-word meta descriptors
+    "literature", "grants", "grant", "funding", "funded",
+    "research", "themes", "theme", "trends", "trend", "landscape",
+    "study", "studies", "analysis", "review", "overview", "survey",
+    "findings", "finding", "published", "emerging", "current", "recent",
+    "priorities", "priority", "advances", "advance", "developments",
+    "development", "areas", "topics", "approaches",
+    # Known multi-word meta phrases
+    "funding trends", "grant themes", "grant priorities", "funding priorities",
+    "research themes", "research trends", "research landscape",
+    "focus areas", "current trends", "emerging themes", "grant funding",
+    "emerging trends", "recent advances", "new developments", "key themes",
+    "hot topics", "research areas",
+})
+
+
+def _strip_meta_words(terms: list[str]) -> list[str]:
+    def _is_meta(term: str) -> bool:
+        t = term.lower().strip()
+        if t in _QUERY_META_WORDS:
+            return True
+        # Compound term where EVERY word is individually a meta-word catches
+        # unlisted combinations like "current landscape", "recent trends", etc.
+        words = t.split()
+        return len(words) > 1 and all(w in _QUERY_META_WORDS for w in words)
+    return [t for t in terms if not _is_meta(t)]
 
 
 def _extract_title_terms(title: str) -> list[str]:
@@ -58,20 +126,39 @@ def router_node(state: AgentState) -> dict:
 
     Your tasks:
     1. Enrich the query for vector embedding (no years, just concepts and keywords)
-    2. Extract 2-5 specific biomedical search terms suitable for PubMed/NIH APIs.
-       - Each term must be 1-3 words maximum — a real MeSH heading or standard biomedical keyword.
-       - Good: ["LRRK2", "Parkinson Disease", "alpha-synuclein"] Bad: ["Parkinson genetic risk factors", "dopamine pathway signaling cascade"]
-       - First term must be the primary disease/topic anchor (e.g. "Parkinson Disease").
-       - Terms must be about the BIOMEDICAL TOPIC only. Never include "grants", "funding", "publications", "research".
+    2. Identify the anchor term (primary disease/topic) and classify all secondary terms:
+       - "explicit_terms": biomedical concepts the USER EXPLICITLY MENTIONED in their question.
+         These will be ANDed into the search query — results MUST contain these.
+         Example: user asks "Parkinson's and biomarkers" → explicit_terms: ["biomarkers"]
+       - "expansion_terms": 0-3 additional MeSH-compatible terms YOU add for better coverage.
+         These are ORed — helpful but not required.
+         Example: you add ["alpha-synuclein", "LRRK2"] to broaden a general PD query.
+       - All terms (anchor + explicit + expansion) go into "search_terms" as a flat list,
+         anchor FIRST. Each term must be 1-3 words. No meta-terms like "grants" or "research".
     3. Extract structured metadata
+
+    SPECIFICITY SCALE (controls how aggressively fresh data is fetched):
+    1 = Broad field — e.g., "oncology", "neuroscience", "immunology"
+    2 = Disease class — e.g., "neurodegeneration", "autoimmune disease", "cancer"
+    3 = Named disease — e.g., "Parkinson Disease", "Alzheimer Disease", "Type 2 Diabetes"
+    4 = Disease + mechanism or biomarker — e.g., "Parkinson Disease biomarkers", "LRRK2 Parkinson"
+    5 = Molecular target or variant — e.g., "LRRK2 G2019S inhibitor", "GBA N370S mutation iPSC"
+    Use the highest level that matches the user's question. When in doubt, round up.
+
+    SOURCE FILTER:
+    - "pubmed": user asks about findings, mechanisms, clinical results, published science
+    - "nih_reporter": user asks about funding trends, grants, NIH investments, what is being studied
+    - "both": user asks about the full landscape, or both perspectives are needed
 
     Return ONLY valid JSON with this exact structure:
     {{
         "enriched_query": "...",
-        "search_terms": ["keyword1", "keyword2"],
+        "anchor": "Primary Disease Term",
+        "explicit_terms": ["term user asked about"],
+        "expansion_terms": ["term you added for coverage"],
+        "search_terms": ["anchor", "explicit1", "expansion1"],
         "domain": "...",
         "years": [...],
-        "entity": "...",
         "specificity": 1-5,
         "source_filter": "pubmed|nih_reporter|both"
     }}
@@ -93,33 +180,167 @@ def router_node(state: AgentState) -> dict:
         logger.error(f"Failed to embed query: {e}")
         query_vector = [0.0] * 768
 
+    anchor = parsed.get("anchor", "")
+    explicit = _strip_meta_words(parsed.get("explicit_terms") or [])
+    expansion = _strip_meta_words(parsed.get("expansion_terms") or [])
+    # Rebuild search_terms authoritatively from classified parts so order is guaranteed
+    search_terms = (
+        [anchor]
+        + [t for t in explicit if t != anchor]
+        + [t for t in expansion if t != anchor and t not in explicit]
+    )
+
     return {
         "query_vector": query_vector,
-        "search_terms": parsed.get("search_terms", []),
+        "search_terms": search_terms or parsed.get("search_terms", []),
+        "explicit_terms": explicit,
+        "expansion_terms": expansion,
         "enriched_query": parsed["enriched_query"],
         "domain": parsed["domain"],
         "years": parsed["years"],
-        "entity": parsed.get("entity"),
         "specificity": parsed["specificity"],
         "source_filter": parsed["source_filter"],
     }
+
+
+def query_refiner_node(state: AgentState) -> dict:
+    """
+    Option 1: Validates and refines the router's parsed query before any fetching.
+    Option 3: Applies source-aware strategy
+
+    One fast Haiku call. No API fetches. Runs between router and library_checker.
+    """
+    import datetime
+
+    current_year = datetime.date.today().year
+
+    user_query = state["user_query"]
+    anchor = (state.get("search_terms") or [""])[0]
+    explicit_terms = state.get("explicit_terms") or []
+    expansion_terms = state.get("expansion_terms") or []
+    years = state.get("years", [])
+    source_filter = state.get("source_filter", "both")
+    specificity = state.get("specificity", 3)
+
+    prompt = f"""You are a biomedical search query expert. Validate and refine this parsed query.
+
+ORIGINAL USER QUESTION: "{user_query}"
+
+CURRENT PARSED QUERY:
+- Anchor (primary disease/topic, always required): {anchor}
+- Explicit terms (user mentioned these, will be ANDed — results must contain): {explicit_terms}
+- Expansion terms (added for coverage, will be ORed — optional breadth): {expansion_terms}
+- Years: {years}
+- Source: {source_filter}  ("pubmed" | "nih_reporter" | "both")
+- Specificity: {specificity}/5
+- Current year: {current_year}
+
+TASK — check each of the following and correct if needed:
+
+1. ANCHOR TERM: Is it the correct MeSH-preferred heading?
+   - "Parkinson's Disease" → "Parkinson Disease"
+   - "Alzheimer's" → "Alzheimer Disease"
+   - "COVID" → "COVID-19"
+   Keep it 1-3 words.
+
+2. EXPLICIT TERMS: Are these truly concepts the user explicitly asked about?
+   If the user didn't name it directly, move it to expansion_terms instead.
+   Keep each term 1-3 words.
+
+3. EXPANSION TERMS: Are they useful and distinct from explicit? Replace vague or
+   redundant ones. 0-3 terms max. Each must be 1-3 words, MeSH-compatible.
+
+4. SOURCE FILTER (Option 3 — source-aware strategy):
+   - Question is about published findings, mechanisms, biology, clinical results
+     → prefer "pubmed" or "both"
+   - Question is about funding trends, grants, what NIH is investing in, emerging
+     priorities, program officer perspective → prefer "nih_reporter" or "both"
+   - Question explicitly mentions both perspectives → "both"
+   Adjust if the current filter doesn't match the intent.
+
+5. YEARS: Do the years match the question's time intent?
+   - "recent" / "emerging" / "new" → [{current_year - 1}, {current_year}]
+   - "trends" / "landscape" / no qualifier → [{current_year - 2}, {current_year - 1}]
+   - "established" / "historical" → broader range is fine
+   Adjust only if clearly wrong.
+
+Respond in valid JSON only:
+{{
+  "anchor": "corrected anchor term",
+  "explicit_terms": ["..."],
+  "expansion_terms": ["..."],
+  "years": [...],
+  "source_filter": "pubmed|nih_reporter|both",
+  "refinement_notes": "1-2 sentences: what changed and why. If nothing changed, say 'Query looks well-formed — no changes needed.'"
+}}"""
+
+    try:
+        response = llm.invoke(prompt)
+        content = response.content.strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        parsed = json.loads(content.strip())
+
+        new_anchor = parsed.get("anchor") or anchor
+        new_explicit = _strip_meta_words(parsed.get("explicit_terms") or [])
+        new_expansion = _strip_meta_words(parsed.get("expansion_terms") or [])
+
+        # Rebuild search_terms authoritatively from refined parts
+        seen = {new_anchor}
+        new_search_terms = [new_anchor]
+        for t in new_explicit + new_expansion:
+            if t and t not in seen:
+                seen.add(t)
+                new_search_terms.append(t)
+
+        notes = parsed.get("refinement_notes", "")
+        logger.info("Query refiner: %s", notes)
+
+        return {
+            "search_terms": new_search_terms,
+            "explicit_terms": new_explicit,
+            "expansion_terms": new_expansion,
+            "years": parsed.get("years") or years,
+            "source_filter": parsed.get("source_filter") or source_filter,
+            "refinement_notes": notes,
+        }
+
+    except Exception as e:
+        logger.error("Query refiner failed: %s", e)
+        return {"refinement_notes": ""}
 
 
 def library_checker_node(state: AgentState) -> dict:
     years = state["years"]
     query_vector = state.get("query_vector")
     specificity = state.get("specificity", 3)
-    min_similarity = 0.2 + (specificity * 0.08)
+    fetch_attempts = state.get("fetch_attempts", 0)
 
     test_limit = int(os.environ.get("BIOINSIGHT_TEST_LIMIT", 0))
-    required_docs = test_limit if test_limit > 0 else 50
+    if test_limit > 0:
+        required_docs = test_limit
+    else:
+        fetch_mode = state.get("fetch_mode", "standard")
+        mode_limit = _FETCH_MODE_LIMITS.get(fetch_mode)
+        required_docs = 500 if mode_limit is None else max(30, int(mode_limit * 0.6))
 
-    if specificity >= 4 and state.get("fetch_attempts", 0) == 0:
+    # High-specificity queries always need a fresh fetch on the first run
+    if specificity >= 4 and fetch_attempts == 0:
         return {"library_has_data": False}
+
+    # Post-fetch: lenient threshold so a successful but partial fetch doesn't loop
+    if fetch_attempts > 0:
+        check_docs = max(5, required_docs // 4)
+        check_similarity = 0.05
+    else:
+        check_docs = required_docs
+        check_similarity = 0.2 + (specificity * 0.08)
 
     library_has_data = all(
         chroma.semantic_search_by_year(
-            query_vector, year, min_records=required_docs, min_similarity=min_similarity
+            query_vector, year, min_records=check_docs, min_similarity=check_similarity
         )
         for year in years
     )
@@ -127,91 +348,201 @@ def library_checker_node(state: AgentState) -> dict:
     return {"library_has_data": library_has_data}
 
 
-def _build_query_pairs(search_terms: list, fallback: str) -> list[tuple[str, str]]:
+def _build_queries(
+    search_terms: list,
+    fallback: str,
+    explicit_terms: list = None,
+    expansion_terms: list = None,
+) -> tuple[str, str]:
     """
-    Turn a list of search terms into (pubmed_query, nih_query) pairs.
+    Build one (pubmed_query, nih_query) pair.
 
-    Strategy: run the anchor term alone for broad coverage, then pair each
-    secondary term with the anchor for focused depth. This avoids the massive
-    OR chain that confuses both APIs and produces irrelevant results.
+    RETRIEVAL PHILOSOPHY:
+    - Anchor (search_terms[0]) is always required.
+    - Explicit terms (user asked for) are ANDed — results must contain these.
+    - Expansion terms are intentionally EXCLUDED from the retrieval query.
+      They over-restrict lexical search, filtering out relevant papers that use
+      synonyms. The semantic embedding layer (BioBERT + UMAP clustering) handles
+      thematic focus without requiring keyword matches.
 
-    PubMed uses Entrez boolean syntax: "Parkinson Disease AND neuroinflammation"
-    NIH Reporter uses space-separated keywords (all must appear): "Parkinson Disease neuroinflammation"
+    When no explicit terms are set, all secondaries are ORed for breadth,
+    so the anchor alone isn't too narrow.
+
+    PubMed: uses [tiab] field tag (title + abstract) and quoted phrases.
+    NIH:    uses "advanced" operator with no field tags.
     """
-    if not search_terms:
-        return [(fallback, fallback)]
+    explicit_terms = explicit_terms or []
 
-    anchor = search_terms[0]
-    pairs = [(anchor, anchor)]  # broad anchor-only pass
+    if not search_terms and not fallback:
+        return "", ""
 
-    for term in search_terms[1:]:
-        pubmed_q = f"{anchor} AND {term}"
-        nih_q = f"{anchor} {term}"
-        pairs.append((pubmed_q, nih_q))
+    anchor = search_terms[0] if search_terms else fallback
 
-    return pairs
+    def _pub(t):
+        return f'"{t}"[tiab]' if " " in t else f"{t}[tiab]"
+
+    def _nih(t):
+        return f'"{t}"' if " " in t else t
+
+    parts_pub = [f'"{anchor}"[tiab]']
+    parts_nih = [f'"{anchor}"']
+
+    if explicit_terms:
+        # Explicit terms → each ANDed in both PubMed and NIH (user required these)
+        for t in explicit_terms:
+            if t and t != anchor:
+                parts_pub.append(_pub(t))
+                parts_nih.append(_nih(t))
+
+    elif len(search_terms) > 1:
+        # No explicit terms — OR expansion terms for PubMed breadth.
+        # NIH gets anchor only: complex boolean over-restricts NIH's full-text index,
+        # and BioBERT handles topical focus without keyword matching.
+        secondary = [t for t in search_terms[1:] if t != anchor]
+        if secondary:
+            parts_pub.append(f"({' OR '.join(_pub(t) for t in secondary)})")
+
+    return " AND ".join(parts_pub), " AND ".join(parts_nih)
+
+
+# Per-mode fetch limits (per year, per source).
+# "everything" uses None — the actual count drives the limit, capped by EVERYTHING_CAP.
+_FETCH_MODE_LIMITS = {
+    "quick": 150,
+    "standard": 400,
+    "deep": 800,
+    "everything": None,
+}
+_EVERYTHING_CAP = 3000  # hard ceiling per year per source for "everything" mode
 
 
 def fetcher_node(state: AgentState) -> dict:
     search_terms = state.get("search_terms", [])
     years = state["years"]
     source_filter = state.get("source_filter")
+    fetch_mode = state.get("fetch_mode", "standard")
 
+    # TEST_LIMIT env var overrides mode (useful for dev/CI runs)
     test_limit = int(os.environ.get("BIOINSIGHT_TEST_LIMIT", 0))
-    fetch_limit = test_limit if test_limit > 0 else 100
-
-    query_pairs = _build_query_pairs(
-        search_terms, fallback=state.get("enriched_query", "")
+    mode_limit = (
+        test_limit if test_limit > 0 else _FETCH_MODE_LIMITS.get(fetch_mode, 400)
     )
 
-    # Spread the fetch budget across queries; anchor gets the full budget,
-    # secondary passes get a proportional share (min 20 to stay meaningful).
-    n_secondary = max(len(query_pairs) - 1, 1)
-    secondary_limit = max(20, fetch_limit // n_secondary)
-
-    logger.info(
-        "Fetcher: %d query pairs, anchor_limit=%d, secondary_limit=%d, years=%s",
-        len(query_pairs),
-        fetch_limit,
-        secondary_limit,
-        years,
+    pubmed_q, nih_q = _build_queries(
+        search_terms,
+        fallback=state.get("enriched_query", ""),
+        explicit_terms=state.get("explicit_terms") or [],
+        expansion_terms=state.get("expansion_terms") or [],
     )
+    logger.info("Fetcher | mode=%s | PubMed: '%s'", fetch_mode, pubmed_q)
+    logger.info("Fetcher | mode=%s | NIH:    '%s'", fetch_mode, nih_q)
 
     total_records = 0
+    corpus_stats: dict = {}
 
     for year in years:
-        for i, (pubmed_q, nih_q) in enumerate(query_pairs):
-            limit = fetch_limit if i == 0 else secondary_limit
-            all_records = []
+        year_stats: dict = {}
+        all_records = []
 
-            if source_filter in ("pubmed", "both", None):
+        # ── PubMed ────────────────────────────────────────────────────────
+        if source_filter in ("pubmed", "both", None):
+            pub_available = count_pubmed(pubmed_q, year)
+            year_stats["pub_available"] = pub_available
+
+            if pub_available > 0:
+                if mode_limit is None:
+                    pub_limit = min(pub_available, _EVERYTHING_CAP)
+                else:
+                    pub_limit = min(mode_limit, pub_available)
+
                 try:
                     records = fetch_pubmed.invoke(
-                        {"domain": pubmed_q, "year": year, "max_results": limit}
+                        {"domain": pubmed_q, "year": year, "max_results": pub_limit}
                     )
                     all_records += records
-                    logger.info("PubMed '%s' → %d passages", pubmed_q, len(records))
+                    year_stats["pub_fetched"] = pub_limit
+                    logger.info(
+                        "PubMed year=%d available=%d fetched=%d → %d passages",
+                        year,
+                        pub_available,
+                        pub_limit,
+                        len(records),
+                    )
                 except Exception as e:
-                    logger.warning("PubMed fetch failed for '%s': %s", pubmed_q, e)
+                    logger.warning("PubMed fetch failed year=%d: %s", year, e)
+                    year_stats["pub_fetched"] = 0
+            else:
+                year_stats["pub_fetched"] = 0
 
-            if source_filter in ("nih_reporter", "both", None):
+        # ── NIH Reporter ─────────────────────────────────────────────────
+        if source_filter in ("nih_reporter", "both", None):
+            nih_available = count_nih_reporter(nih_q, year)
+            year_stats["nih_available"] = nih_available
+
+            if nih_available > 0:
+                if mode_limit is None:
+                    nih_limit = min(nih_available, _EVERYTHING_CAP)
+                else:
+                    nih_limit = min(mode_limit, nih_available)
+
+                nih_base = {
+                    "domain": nih_q,
+                    "fiscal_year": year,
+                    "max_results": nih_limit,
+                }
+
                 try:
-                    records = fetch_nih_reporter.invoke(
-                        {"domain": nih_q, "fiscal_year": year, "max_results": limit}
-                    )
+                    # Stratified sampling: if we're fetching < 60% of what's available,
+                    # split the budget between offset=0 (most relevant) and offset=middle
+                    # (mid-relevance) to get better subtopic diversity.
+                    if nih_available > nih_limit * 1.7 and nih_limit >= 40:
+                        half = nih_limit // 2
+                        records_top = fetch_nih_reporter.invoke(
+                            {**nih_base, "max_results": half}
+                        )
+                        records_mid = fetch_nih_reporter.invoke(
+                            {
+                                **nih_base,
+                                "max_results": half,
+                                "offset_start": nih_available // 2,
+                            }
+                        )
+                        records = records_top + records_mid
+                        logger.info(
+                            "NIH year=%d stratified: top=%d mid=%d → %d passages",
+                            year,
+                            len(records_top),
+                            len(records_mid),
+                            len(records),
+                        )
+                    else:
+                        records = fetch_nih_reporter.invoke(nih_base)
+                        logger.info(
+                            "NIH year=%d available=%d fetched=%d → %d passages",
+                            year,
+                            nih_available,
+                            nih_limit,
+                            len(records),
+                        )
                     all_records += records
-                    logger.info("NIH '%s' → %d passages", nih_q, len(records))
+                    year_stats["nih_fetched"] = nih_limit
                 except Exception as e:
-                    logger.warning("NIH fetch failed for '%s': %s", nih_q, e)
+                    logger.warning("NIH fetch failed year=%d: %s", year, e)
+                    year_stats["nih_fetched"] = 0
+            else:
+                year_stats["nih_fetched"] = 0
 
-            if all_records:
-                embedded = embedder.embed_records(all_records)
-                chroma.upsert_records(embedded)
-                total_records += len(all_records)
+        if all_records:
+            embedded = embedder.embed_records(all_records)
+            chroma.upsert_records(embedded)
+            total_records += len(all_records)
+
+        corpus_stats[str(year)] = year_stats
 
     return {
         "records_fetched": total_records,
         "fetch_attempts": state.get("fetch_attempts", 0) + 1,
+        "corpus_stats": corpus_stats,
     }
 
 
@@ -308,16 +639,19 @@ def material_assessor_node(state: AgentState) -> dict:
     for doc in list(parent_map.values())[:30]:
         doc["sentences"].sort(key=lambda x: int(x[0].rsplit("__s", 1)[1]))
         body = " ".join(t for _, t in doc["sentences"])
-        doc_blocks.append(
-            f"({doc['pi_name']}, {doc['year']}) — {doc['title']}\n{body}"
-        )
+        doc_blocks.append(f"({doc['pi_name']}, {doc['year']}) — {doc['title']}\n{body}")
     sample_text = "\n\n---\n\n".join(doc_blocks)
+
+    user_query = state.get("user_query", "")
 
     prompt = f"""You are a biomedical research intelligence analyst assessing a dataset before deep analysis.
 
-Query: {enriched_query}
+ORIGINAL USER QUESTION: "{user_query}"
+SEARCH SCOPE: {enriched_query}
 Years: {years}
 Source: {source_filter}
+
+Your job is to assess whether the data below is sufficient to answer the user's specific question — not just whether it covers the topic generally.
 
 Library scope stats:
 - Total passages matching year/source filter: {total_passages_in_scope}
@@ -327,24 +661,25 @@ Library scope stats:
 Top 30 most relevant documents:
 {sample_text}
 
-Assess this dataset and respond in valid JSON only:
+Assess this dataset in the context of the user's question and respond in valid JSON only:
 {{
-  "assessment": "2-3 sentence qualitative assessment: is the data relevant and deep, or superficial? what topics are well-covered across these {total_unique_docs} documents? what seems missing?",
+  "assessment": "2-3 sentences: does this data actually answer '{user_query}'? What aspects of the question are well-covered? What is missing that would be needed to answer it fully?",
   "coverage_score": 1-5,
   "action": "proceed" or "fetch_more",
-  "reasoning": "one sentence explaining the action recommendation",
+  "reasoning": "one sentence explaining the action recommendation relative to the user's question",
   "suggested_terms": ["ShortMeSHTerm1", "ShortMeSHTerm2"]
 }}
 
 Action rules:
-- "proceed" if the data covers the query topic with reasonable depth across these {total_unique_docs} documents.
-- "fetch_more" ONLY if there are clear, specific gaps that different search terms would fill. Be conservative.
+- "proceed" if the data covers the user's specific question with reasonable depth.
+- "fetch_more" ONLY if there are clear, named gaps in the data that different search terms would fill. Be conservative — default to proceed.
 
 Suggested term rules (CRITICAL):
-- Each suggested term must be 1-3 words maximum — a real MeSH term or standard biomedical keyword.
-- Good examples: "neuroinflammation", "LRRK2", "GBA mutation", "alpha-synuclein", "dopamine transporter"
-- Bad examples: "neuroinflammation cytokines IL-6 TNF-alpha", "genetic risk factors GBA PINK1 DJ-1"
-- Never suggest multi-word phrases longer than 3 words. Each term runs as its own focused API query."""
+- Terms must address what is MISSING for the user's question — not repeat what was already searched.
+- Each term must be 1-3 words maximum — a real MeSH term or standard biomedical keyword.
+- Good: "neuroinflammation", "LRRK2", "GBA mutation", "alpha-synuclein"
+- Bad: "neuroinflammation cytokines IL-6 TNF-alpha", "genetic risk factors GBA PINK1 DJ-1"
+- Never suggest terms already in the search scope: {state.get("search_terms", [])} or any terms like grant,funding trends, emerging topics that aren't real biomedical concepts."""
 
     try:
         response = llm.invoke(prompt)
@@ -418,9 +753,12 @@ def prelim_report_node(state: AgentState) -> dict:
         doc_blocks.append(f"({doc['pi_name']}, {doc['year']}): {body}")
     sample_text = "\n\n".join(doc_blocks)
 
-    prompt = f"""You are a biomedical research analyst. Write a SHORT preliminary overview (200-250 words) of this dataset for a program officer deciding whether to run a full analysis.
+    user_query = state.get("user_query", "")
 
-Query: {enriched_query}
+    prompt = f"""You are a biomedical research analyst. Write a SHORT preliminary overview (200-250 words) for a program officer deciding whether to run a full analysis.
+
+ORIGINAL USER QUESTION: "{user_query}"
+SEARCH SCOPE: {enriched_query}
 Years: {years}
 Source: {source_filter}
 Total unique source documents in scope: {total_unique_docs} (showing top 25 by relevance below)
@@ -428,12 +766,12 @@ Total unique source documents in scope: {total_unique_docs} (showing top 25 by r
 Top 25 most relevant documents:
 {sample_text}
 
-Write the overview in plain prose with these three parts:
-1. **What's here** — the main research themes visible across these {total_unique_docs} documents
-2. **Depth** — how focused/deep vs. broad/shallow the coverage appears
-3. **Potential gaps** — anything the query asks about that seems absent
+Write in crisp declarative prose with these three parts, always framed around the user's question:
+1. **What's here** — which aspects of "{user_query}" are visible in these {total_unique_docs} documents? Name actual topics, proteins, mechanisms, or PI names you can see.
+2. **Depth** — is the coverage specific enough to answer the user's question, or is it broad and tangential?
+3. **Potential gaps** — what would a researcher need to fully answer "{user_query}" that appears absent here?
 
-Be direct and specific. Name actual topics, proteins, mechanisms, PI names you can see. Do not pad."""
+Be direct and specific. Do not pad. Do not repeat the user's question verbatim — synthesize what the data shows about it."""
 
     try:
         response = llm.invoke(prompt)
@@ -564,26 +902,36 @@ def extraction_node(state: AgentState) -> dict:
             )
         passages_text = "\n\n---\n\n".join(doc_blocks)
 
-        finding_prompt = f"""You are analyzing biomedical research documents to extract structured findings.
-Original query: {enriched_query}
+        finding_prompt = f"""You are analyzing biomedical research documents to extract high-value findings.
+Original user question: {enriched_query}
 Source: {source_filter}
 
 Documents (each block is one grant/paper; the ID in brackets is the citation anchor):
 {passages_text}
 
-Extract 2-3 specific findings that are explicitly stated in the text above.
-Rules:
-- Only extract claims that are clearly asserted as established facts or confirmed results, NOT research aims, hypotheses, or future plans ("will test", "aims to", "we expect").
-- Use the ID in brackets as the evidence_id, and construct citation_text from the Author/Year shown.
-- Be specific — avoid vague generalizations.
+Extract 0-3 findings that are explicitly stated in the text AND directly relevant to the original question.
+
+QUALITY RULES — prefer findings in this order:
+1. Quantitative results: specific numbers, effect sizes, percentages, p-values, fold-changes (e.g., "LRRK2 inhibition reduced phospho-S129 α-synuclein by 60% in patient iPSC-neurons")
+2. Named mechanism or pathway: a specific molecular interaction, causal relationship, or pathway finding (e.g., "GBA loss-of-function activates NLRP3 inflammasome via lysosomal dysfunction")
+3. Named clinical or translational outcome: trial result, biomarker validation, patient subgroup finding
+4. General thematic finding: only if nothing more specific exists
+
+EXCLUSION RULES — do NOT extract:
+- Research aims, hypotheses, or future plans ("will test", "aims to", "we hypothesize", "we expect", "proposed")
+- Background statements or textbook-level facts ("dopamine neurons are lost in Parkinson's")
+- Vague generalizations without named entities or measurements
+
+If the documents are off-topic or contain only aims/background, return 0 findings — do not pad with weak claims.
+
+Use the ID in brackets as the evidence_id. Construct citation_text as [Last Name et al., Year].
 
 Return ONLY valid JSON, no other text:
 {{"findings": [
     {{
-        "claim": "one specific factual claim explicitly stated in the documents",
+        "claim": "specific, cited factual finding with named entities or measurements",
         "evidence_ids": ["nih_reporter__12345__s0"],
-        "citation_text": "[Smith et al., 2024]",
-        "claim_type": "finding"
+        "citation_text": "[Smith et al., 2024]"
     }}
 ]}}"""
 
@@ -615,25 +963,31 @@ def verifier_node(state: AgentState) -> dict:
     """Verifies extracted claims against grouped document context, parallelized."""
     clusters = state.get("clusters", {})
     extracted_findings = state.get("cluster_findings", {})
+    user_query = state.get("user_query", "")
+    enriched_query = state.get("enriched_query", "")
 
     def verify_cluster(label: int, passages: list) -> tuple[int, list]:
         claims_to_check = extracted_findings.get(label, [])
         if not claims_to_check:
             return label, []
 
-        # Same grouped context as extraction so the verifier sees full abstracts
         docs = _group_passages_by_parent(passages, max_docs=6)
         doc_blocks = []
         for doc in docs:
             text_body = " ".join(sent for _, sent in doc["sentences"])
             anchor_id = doc["sentences"][0][0]
-            doc_blocks.append(f"[{anchor_id}] ({doc['pi_name']}, {doc['year']}): {text_body}")
+            doc_blocks.append(
+                f"[{anchor_id}] ({doc['pi_name']}, {doc['year']}): {text_body}"
+            )
         source_text = "\n\n---\n\n".join(doc_blocks)
 
         claims_json_str = json.dumps(claims_to_check, indent=2)
 
         verifier_prompt = f"""You are a strict, objective fact-checker.
-Verify each CLAIM against the SOURCE DOCUMENTS below.
+Verify each CLAIM against the SOURCE DOCUMENTS below using two independent criteria.
+
+ORIGINAL USER QUESTION: "{user_query}"
+SEARCH SCOPE: {enriched_query}
 
 SOURCE DOCUMENTS (each block is one full grant abstract or paper):
 {source_text}
@@ -641,17 +995,25 @@ SOURCE DOCUMENTS (each block is one full grant abstract or paper):
 CLAIMS TO VERIFY:
 {claims_json_str}
 
-Rules:
-1. Use ONLY the provided source documents.
-2. A claim is supported only if the document text explicitly states it as an established fact or confirmed result.
-3. Claims based on research aims ("will test", "aims to", "we hypothesize") are NOT supported — mark them false.
-4. Keep the exact same order as the input claims.
+For each claim evaluate TWO things independently:
 
-Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY:
+1. FACTUAL SUPPORT — is this claim explicitly stated as an established fact or confirmed result in the source documents?
+   - TRUE only if the document text explicitly asserts it as fact/result.
+   - FALSE if it is a research aim ("will test", "aims to", "we hypothesize", "we expect", "proposed").
+   - FALSE if it is background/textbook knowledge not evidenced by the specific documents shown.
+
+2. QUERY RELEVANCE — does this claim directly address the user's original question?
+   - TRUE if the claim provides a specific answer, finding, or insight relevant to what the user asked.
+   - FALSE if the claim is factually supported but tangential (e.g., describes methods, animal models, or a different disease/target than asked about).
+
+A claim passes ONLY if BOTH criteria are true.
+
+Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY, in the same order:
 [
   {{
     "is_supported": true,
-    "reasoning": "The document explicitly states..."
+    "is_relevant": true,
+    "reasoning": "Document explicitly states X; directly addresses the user's question about Y."
   }}
 ]"""
 
@@ -669,11 +1031,19 @@ Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY:
             for i, eval_result in enumerate(evaluation_results):
                 if i >= len(claims_to_check):
                     break
-                if eval_result.get("is_supported") is True:
+                supported = eval_result.get("is_supported") is True
+                relevant = eval_result.get("is_relevant") is True
+                if supported and relevant:
                     approved_claims.append(claims_to_check[i])
                 else:
+                    reason = eval_result.get("reasoning", "")
                     logger.warning(
-                        f"Dropped (cluster {label}): {claims_to_check[i].get('claim')} | {eval_result.get('reasoning', '')}"
+                        "Dropped (cluster %d) supported=%s relevant=%s: %s | %s",
+                        label,
+                        supported,
+                        relevant,
+                        claims_to_check[i].get("claim"),
+                        reason,
                     )
             return label, approved_claims
 
@@ -682,7 +1052,11 @@ Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY:
             return label, []
 
     verified_findings = {}
-    work = [(label, passages) for label, passages in clusters.items() if label != -1 and label in extracted_findings]
+    work = [
+        (label, passages)
+        for label, passages in clusters.items()
+        if label != -1 and label in extracted_findings
+    ]
     logger.info(f"Verification: verifying {len(work)} clusters sequentially")
 
     for label, passages in work:
@@ -695,7 +1069,11 @@ Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY:
 def _add_hyperlink(paragraph, text: str, url: str):
     """Insert a clickable hyperlink into a docx paragraph."""
     part = paragraph.part
-    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
     hyperlink = OxmlElement("w:hyperlink")
     hyperlink.set(qn("r:id"), r_id)
     run = OxmlElement("w:r")
@@ -717,7 +1095,7 @@ def _write_inline(paragraph, text: str, citation_url_map: dict):
     cursor = 0
     for m in token_pattern.finditer(text):
         if m.start() > cursor:
-            paragraph.add_run(text[cursor:m.start()])
+            paragraph.add_run(text[cursor : m.start()])
         citation_text = m.group(1)
         url_part = m.group(2)
         if url_part:
@@ -819,6 +1197,7 @@ def _markdown_to_docx(markdown_text: str, citation_url_map: dict) -> bytes:
 
 def report_writer_node(state: AgentState) -> dict:
     """Writes the final report using only verified claims, split by data source."""
+    user_query = state.get("user_query", "")
     enriched_query = state.get("enriched_query", state.get("domain", ""))
     years = state["years"]
     source_filter = state.get("source_filter")
@@ -880,13 +1259,17 @@ def report_writer_node(state: AgentState) -> dict:
     elif has_pubmed:
         source_context = "All findings come from published literature (PubMed)."
     elif has_nih:
-        source_context = "All findings come from NIH-funded grant abstracts (NIH Reporter)."
+        source_context = (
+            "All findings come from NIH-funded grant abstracts (NIH Reporter)."
+        )
 
     synthesis_prompt = f"""You are a senior biomedical research analyst writing an intelligence report for a program officer who needs to make funding decisions.
 
-Query: {enriched_query}
-Years: {years}
+ORIGINAL USER QUESTION: "{user_query}"
+SEARCH SCOPE: {enriched_query} | Years: {years}
 {source_context}
+
+The report must directly answer the user's original question. Every section should be framed around what the user asked — not just what the data happens to contain.
 
 VERIFIED FINDINGS ({len(verified_findings)} clusters, {pubmed_count + nih_count} total findings):
 Each finding includes a "data_source" field: "pubmed" = published literature, "nih_reporter" = active/recent grant funding.
@@ -899,38 +1282,54 @@ Write a structured report in EXACTLY this order. Use markdown headings.
 # BioInsight Report: {enriched_query}
 
 ## Executive Summary
-Write 3-5 bullet points answering "so what does this data tell a funder?". Be direct and specific — name actual targets, drugs, mechanisms, or gaps. Each bullet should contain a citation.
+3-5 bullet points that directly answer: **"{user_query}"**
+Each bullet must name a specific finding (target, mechanism, drug, trend, or gap) and include a citation. Lead with the most actionable insight.
 
 ## Key Entities at a Glance
-Produce a markdown table of the most important named biological entities (proteins, genes, drugs, pathways, biomarkers, cell types) that appear in the verified findings. Only include entities explicitly named in the findings below.
+A markdown table of the most important named biological entities (proteins, genes, drugs, pathways, biomarkers, cell types) that appear in the verified findings. Only include entities you can directly cite.
 
-| Entity | Type | Key Finding | Citation |
-|--------|------|-------------|----------|
-(fill rows)
+| Entity | Type | Role in {enriched_query.split()[0] if enriched_query else 'this area'} | Key Finding | Citation |
+|--------|------|---------|-------------|----------|
+(fill rows — leave no uncited rows)
 
 {f'''## What Published Research Shows
-Summarize findings where data_source is "pubmed". Group by theme. After every claim cite using the citation_text exactly.
-Aim for 3-5 themes with 1-3 sentences each.
+Start with 1-2 sentences that orient the reader: what is the overall picture emerging from the published literature as it relates to "{user_query}"?
+
+Then group findings by theme. For EACH theme:
+- Open with 1-2 sentences introducing what this theme is and why it matters in the context of the user's question.
+- Follow with the specific findings and citations.
+
+Aim for 3-5 themes. After every claim, cite using the citation_text exactly.
 
 ## Where Grant Funding is Going
-Summarize findings where data_source is "nih_reporter". Group by theme. After every claim cite using the citation_text exactly.
-Highlight where grant activity aligns with or diverges from the published literature above.
-Aim for 3-5 themes with 1-3 sentences each.''' if has_pubmed and has_nih else f'''## Research Findings by Theme
-Group findings by theme. After every claim cite using the citation_text exactly. Aim for 3-5 themes.'''}
+Start with 1-2 sentences: how does the NIH grant landscape for this topic relate to what the user asked — is investment aligned with published findings, or diverging toward emerging priorities?
+
+Then group findings by theme. For EACH theme:
+- Open with 1-2 sentences introducing what this funding area is and what it signals strategically.
+- Follow with the specific findings and citations.
+
+Aim for 3-5 themes. After every claim, cite using the citation_text exactly.''' if has_pubmed and has_nih else f'''## Research Findings by Theme
+Start with 1-2 sentences framing the overall picture as it relates to "{user_query}".
+
+For EACH theme:
+- Open with 1-2 sentences introducing what this theme covers and its relevance to the user's question.
+- Follow with specific findings and citations.
+
+Aim for 3-5 themes.'''}
 
 ## Research Gaps & White Space
-What important aspects of "{enriched_query}" are absent or under-represented across ALL the verified findings? Be specific — name what is missing, not just "more research is needed."
+What specific aspects of "{user_query}" are absent or under-represented in the verified findings? Frame gaps in terms of the user's original question — what did they ask about that the data couldn't answer? Be concrete: name missing targets, populations, mechanisms, or time horizons.
 
 ## Strategic Summary
-2-3 sentences. What is the single most important insight, and what would a well-targeted next investment look like based on these findings?
+2-3 sentences answering: given this data, what is the single most important insight for someone asking "{user_query}", and what would a well-targeted next action or investment look like?
 
 ---
 
 CRITICAL RULES:
 - Use citation_text EXACTLY as it appears in the JSON (e.g., [Smith et al., 2024]). Never paraphrase or reformat it.
-- Every claim must have a citation from the findings. No unsupported statements.
+- Every factual claim must have a citation. No unsupported statements.
 - Do NOT use raw system IDs (nih_reporter__, pubmed__, etc.) anywhere in the output.
-- For the entity table: only rows for entities you can cite. Leave no uncited rows."""
+- Frame the entire report in terms of the original user question — not just the enriched query."""
 
     response = synthesis_llm.invoke(synthesis_prompt)
 

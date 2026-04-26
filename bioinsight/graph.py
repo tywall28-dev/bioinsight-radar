@@ -8,6 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from bioinsight.nodes import (
     fetcher_node,
     router_node,
+    query_refiner_node,
     library_checker_node,
     material_assessor_node,
     prelim_report_node,
@@ -20,6 +21,7 @@ from bioinsight.nodes import (
 
 graph = StateGraph(AgentState)
 graph.add_node("router", router_node)
+graph.add_node("query_refiner", query_refiner_node)
 graph.add_node("library_checker", library_checker_node)
 graph.add_node("fetcher", fetcher_node)
 graph.add_node("material_assessor", material_assessor_node)
@@ -40,20 +42,8 @@ def should_fetch(state: AgentState) -> str:
         return "fetcher"
 
 
-def should_proceed(state: AgentState) -> str:
-    """
-    After the material assessor runs, decide whether to fetch more data
-    or move on to the preliminary report.
-    The assessor can trigger at most one extra fetch; after that we always proceed.
-    """
-    action = state.get("assessment_action", "proceed")
-    fetch_attempts = state.get("fetch_attempts", 0)
-    if action == "fetch_more" and fetch_attempts < 4:
-        return "fetcher"
-    return "prelim_report"
-
-
-graph.add_edge("router", "library_checker")
+graph.add_edge("router", "query_refiner")
+graph.add_edge("query_refiner", "library_checker")
 graph.add_conditional_edges(
     "library_checker",
     should_fetch,
@@ -64,14 +54,10 @@ graph.add_conditional_edges(
     },
 )
 graph.add_edge("fetcher", "library_checker")
-graph.add_conditional_edges(
-    "material_assessor",
-    should_proceed,
-    {
-        "fetcher": "fetcher",
-        "prelim_report": "prelim_report",
-    },
-)
+# material_assessor always proceeds to prelim_report.
+# The human controls additional fetching via the "Fetch More" button,
+# which re-enters the graph at library_checker with a targeted gap-fill query.
+graph.add_edge("material_assessor", "prelim_report")
 graph.add_edge("prelim_report", "subset_modeler")
 
 # Linear synthesis pipeline

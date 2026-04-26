@@ -17,6 +17,7 @@ Design Philosophy:
 
 from __future__ import annotations
 import logging
+import re
 import time
 from typing import Optional
 import os
@@ -112,11 +113,70 @@ def _retry(fn, retries: int = 3, base_delay: float = 2.0):
 
 
 # ---------------------------------------------------------------------------
-# Tool 1 — NIH RePORTER v2
+# Corpus size probes — cheap count calls before committing to full fetches
 # ---------------------------------------------------------------------------
 
+NCBI_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 NIH_REPORTER_URL = "https://api.reporter.nih.gov/v2/projects/search"
 NIH_PAGE_SIZE = 500
+
+
+def count_pubmed(query: str, year: int, email: str = "bioinsight@example.com") -> int:
+    """Return total PubMed hits for a query+year without downloading any records."""
+    full_query = _build_pubmed_query(query, None, year)
+    params: dict = {
+        "db": "pubmed",
+        "term": full_query,
+        "retmax": 0,
+        "rettype": "count",
+        "email": email,
+    }
+    api_key = os.environ.get("NCBI_API_KEY", "")
+    if api_key:
+        params["api_key"] = api_key
+    try:
+        resp = requests.get(NCBI_ESEARCH_URL, params=params, timeout=15)
+        resp.raise_for_status()
+        m = re.search(r"<Count>(\d+)</Count>", resp.text)
+        return int(m.group(1)) if m else 0
+    except Exception as exc:
+        logger.warning("count_pubmed failed for '%s' year=%d: %s", query, year, exc)
+        return 0
+
+
+def count_nih_reporter(
+    domain: str,
+    fiscal_year: int,
+) -> int:
+    """Return total NIH Reporter hits without downloading project records."""
+    criteria: dict = {
+        "advanced_text_search": {
+            "operator": "advanced",
+            "search_field": "all",
+            "search_text": domain,
+        },
+        "fiscal_years": [fiscal_year],
+    }
+
+    payload = {
+        "criteria": criteria,
+        "offset": 0,
+        "limit": 1,
+        "include_fields": ["ApplId"],
+    }
+    try:
+        resp = requests.post(NIH_REPORTER_URL, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        # NIH Reporter v2: total is inside the "meta" sub-object, not at root level
+        total = data.get("meta", {}).get("total", data.get("total", 0))
+        logger.info("NIH count: year=%d query='%s' → %d", fiscal_year, domain[:80], total)
+        return total
+    except Exception as exc:
+        logger.warning(
+            "count_nih_reporter failed for '%s' year=%d: %s", domain, fiscal_year, exc
+        )
+        return 0
 
 
 def _nih_reporter_page(
@@ -125,15 +185,21 @@ def _nih_reporter_page(
     offset: int,
     limit: int,
 ) -> list[dict]:
-    payload = {
-        "criteria": {
-            "advanced_text_search": {
-                "operator": "and",
-                "search_field": "all",
-                "search_text": domain,
-            },
-            "fiscal_years": [fiscal_year],
+    # "advanced" operator supports full boolean: AND, OR, NOT, parentheses,
+    # and quoted phrases (e.g. "Parkinson Disease" AND (LRRK2 OR GBA)).
+    # search_field="all" searches titles, abstracts, and terms — needed because
+    # grants often use "autism" / "ASD" rather than the full phrase in abstracts.
+    criteria: dict = {
+        "advanced_text_search": {
+            "operator": "advanced",
+            "search_field": "all",
+            "search_text": domain,
         },
+        "fiscal_years": [fiscal_year],
+    }
+
+    payload = {
+        "criteria": criteria,
         "offset": offset,
         "limit": limit,
         "include_fields": [
@@ -155,22 +221,24 @@ def fetch_nih_reporter(
     domain: str,
     fiscal_year: int,
     max_results: int = 1000,
+    offset_start: int = 0,
 ) -> list[BioInsightRecord]:
     """
     Fetch NIH RePORTER grants for a given domain and fiscal year.
     Each grant abstract is split into sentence-level passages at ingest.
 
     Args:
-        domain: Disease or research area keyword (e.g. "Parkinson Disease").
+        domain: Boolean search string using "advanced" operator syntax.
         fiscal_year: NIH fiscal year (e.g. 2024).
         max_results: Upper bound on records returned (default 500).
+        offset_start: Starting offset into the result set (for stratified sampling).
 
     Returns:
         List of BioInsightRecord objects with embedding=[] ready for
         EmbeddingService processing.
     """
     records: list[BioInsightRecord] = []
-    offset = 0
+    offset = offset_start
     limit = min(NIH_PAGE_SIZE, max_results)
 
     logger.info(
@@ -180,7 +248,9 @@ def fetch_nih_reporter(
     )
 
     while len(records) < max_results:
-        batch = _retry(lambda: _nih_reporter_page(domain, fiscal_year, offset, limit))
+        batch = _retry(
+            lambda: _nih_reporter_page(domain, fiscal_year, offset, limit)
+        )
         if not batch:
             break
 

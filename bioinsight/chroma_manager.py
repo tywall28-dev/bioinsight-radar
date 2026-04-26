@@ -170,12 +170,14 @@ class BioInsightChromaManager:
             logger.error("No valid records to upsert after validation.")
             return 0
 
-        self._collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        _BATCH = 5000  # ChromaDB hard limit is ~5461; stay well under it
+        for start in range(0, len(ids), _BATCH):
+            self._collection.upsert(
+                ids=ids[start : start + _BATCH],
+                embeddings=embeddings[start : start + _BATCH],
+                documents=documents[start : start + _BATCH],
+                metadatas=metadatas[start : start + _BATCH],
+            )
         logger.info("Upserted %d records into '%s'.", len(ids), COLLECTION_NAME)
         return len(ids)
 

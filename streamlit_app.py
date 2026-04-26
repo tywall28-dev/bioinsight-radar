@@ -20,6 +20,34 @@ if "projects" not in st.session_state:
     st.session_state.projects = {}
 if "current_query" not in st.session_state:
     st.session_state.current_query = ""
+if "fetch_mode" not in st.session_state:
+    st.session_state.fetch_mode = "standard"
+
+# ── Sidebar — persistent fetch mode selector ──────────────────────────────
+with st.sidebar:
+    st.header("Fetch Settings")
+    _MODE_LABELS = {
+        "quick": "Quick  (~150 docs/yr) — fast exploration",
+        "standard": "Standard  (~400 docs/yr) — balanced",
+        "deep": "Deep  (~800 docs/yr) — thorough analysis",
+        "everything": "Everything  (all available) — complete corpus",
+    }
+    selected = st.radio(
+        "Data coverage",
+        options=list(_MODE_LABELS.keys()),
+        index=list(_MODE_LABELS.keys()).index(st.session_state.fetch_mode),
+        format_func=lambda m: _MODE_LABELS[m],
+    )
+    st.session_state.fetch_mode = selected
+    st.caption(
+        "Counts are **per year per source** before deduplication. "
+        "Availability is checked before each fetch — if fewer records exist the full set is used."
+    )
+    if selected == "everything":
+        st.warning(
+            "Everything mode can be slow for broad queries. Hard cap: 3,000 docs/yr/source."
+        )
+
 
 def render_coverage_breakdown(bd: dict):
     """Render the structured coverage breakdown panel."""
@@ -48,7 +76,7 @@ def render_coverage_breakdown(bd: dict):
                     "Term": [t["term"] for t in top_terms],
                     "Count": [t["count"] for t in top_terms],
                 },
-                use_container_width=True,
+                width=600,
                 hide_index=True,
             )
 
@@ -97,7 +125,11 @@ with col_chat:
 
             try:
                 for chunk in app.stream(
-                    {"user_query": st.session_state.current_query}, config=config
+                    {
+                        "user_query": st.session_state.current_query,
+                        "fetch_mode": st.session_state.fetch_mode,
+                    },
+                    config=config,
                 ):
                     pass
                 state = app.get_state(config)
@@ -109,10 +141,51 @@ with col_chat:
 
         s = st.session_state.current_state
         action = s.get("assessment_action", "proceed")
-        coverage_indicator = "✅ Good coverage" if action == "proceed" else "⚠️ Limited coverage — more data recommended"
+        coverage_indicator = (
+            "✅ Good coverage"
+            if action == "proceed"
+            else "⚠️ Limited coverage — more data recommended"
+        )
+
+        # Build query interpretation line
+        activity_codes = s.get("activity_codes") or []
+        nih_filter = (
+            f"  |  NIH mechanisms: `{activity_codes}`" if activity_codes else ""
+        )
+        explicit = s.get("explicit_terms") or []
+        expansion = s.get("expansion_terms") or []
+        terms_display = ""
+        if explicit:
+            terms_display += f"  Required: `{explicit}`"
+        if expansion:
+            terms_display += f"  Broadened by: `{expansion}`"
+        if not terms_display:
+            terms_display = f"  Terms: `{s.get('search_terms', [])}`"
+
+        refinement = s.get("refinement_notes", "")
+        refinement_block = f"\n> 🔍 *{refinement}*\n" if refinement else ""
+
+        # Corpus stats summary
+        corpus_stats = s.get("corpus_stats") or {}
+        corpus_lines = []
+        for yr, yst in sorted(corpus_stats.items()):
+            parts = []
+            if "pub_available" in yst:
+                parts.append(
+                    f"PubMed {yst.get('pub_fetched', 0):,} / {yst['pub_available']:,} available"
+                )
+            if "nih_available" in yst:
+                parts.append(
+                    f"NIH {yst.get('nih_fetched', 0):,} / {yst['nih_available']:,} available"
+                )
+            if parts:
+                corpus_lines.append(f"**{yr}**: " + "  |  ".join(parts))
+        corpus_block = "\n".join(corpus_lines) if corpus_lines else ""
 
         preview_msg = f"""**Query interpreted as:**
-Search terms: `{s.get('search_terms', [])}`  |  Years: `{s.get('years', [])}`  |  Source: `{s.get('source_filter', 'both')}`
+{terms_display}  |  Years: `{s.get('years', [])}`  |  Source: `{s.get('source_filter', 'both')}`{nih_filter}
+{refinement_block}
+{corpus_block}
 
 ---
 
@@ -147,19 +220,36 @@ Search terms: `{s.get('search_terms', [])}`  |  Years: `{s.get('years', [])}`  |
                 st.session_state.stage = "running_analysis"
                 st.rerun()
         with col2:
-            fetch_label = f"📥 Fetch More ({', '.join(suggested[:2])})" if suggested else "📥 Fetch More Data"
+            fetch_label = (
+                f"📥 Fetch More ({', '.join(suggested[:2])})"
+                if suggested
+                else "📥 Fetch More Data"
+            )
             if st.button(fetch_label, use_container_width=True):
                 config = {"configurable": {"thread_id": st.session_state.thread_id}}
                 existing = s.get("search_terms") or []
                 existing_set = {t.lower() for t in existing}
-                # Keep the anchor (existing[0]) + only add genuinely new terms.
-                # The fetcher runs anchor-only + one focused query per new term,
-                # so don't re-add terms that were already fetched.
                 new_terms = [t for t in suggested if t.lower() not in existing_set]
-                anchor = existing[:1]  # preserve the primary disease anchor
+                anchor = existing[:1]
+
+                # Fetch More works by re-entering at library_checker with
+                # library_has_data=False, which causes should_fetch to route to
+                # the real fetcher (API calls actually run).
+                #
+                # Query: explicit_terms=[] + search_terms=[anchor]+new_terms triggers
+                # the OR fallback in _build_queries:
+                #   "Anchor"[tiab] AND (new_term1[tiab] OR new_term2[tiab])
+                # This targets the gap topics without over-restricting.
+                #
+                # fetch_attempts is reset to 0 so the error guard doesn't block
+                # a fresh fetch cycle triggered by the user.
                 update = {
                     "library_has_data": False,
                     "search_terms": list(dict.fromkeys(anchor + new_terms)),
+                    "explicit_terms": [],
+                    "expansion_terms": new_terms,
+                    "fetch_attempts": 0,
+                    "years_needing_data": s.get("years") or [],
                 }
                 app.update_state(config, update, as_node="library_checker")
                 st.session_state.stage = "running_pipeline_resume"
@@ -181,7 +271,11 @@ Search terms: `{s.get('search_terms', [])}`  |  Years: `{s.get('years', [])}`  |
 
         s = st.session_state.current_state
         action = s.get("assessment_action", "proceed")
-        coverage_indicator = "✅ Good coverage" if action == "proceed" else "⚠️ Still limited — consider broadening the query"
+        coverage_indicator = (
+            "✅ Good coverage"
+            if action == "proceed"
+            else "⚠️ Still limited — consider broadening the query"
+        )
 
         preview_msg = f"""**Updated Data Assessment:** {coverage_indicator}
 
@@ -200,7 +294,9 @@ Search terms: `{s.get('search_terms', [])}`  |  Years: `{s.get('years', [])}`  |
     # ── Stage 4: run full analysis ────────────────────────────────────────
 
     elif st.session_state.stage == "running_analysis":
-        with st.spinner("Running topic modeling, extracting and verifying findings... this takes a few minutes."):
+        with st.spinner(
+            "Running topic modeling, extracting and verifying findings... this takes a few minutes."
+        ):
             config = {"configurable": {"thread_id": st.session_state.thread_id}}
             try:
                 for chunk in app.stream(None, config=config):
@@ -222,11 +318,15 @@ Search terms: `{s.get('search_terms', [])}`  |  Years: `{s.get('years', [])}`  |
 
         report_docx = st.session_state.current_state.get("report_docx")
         if report_docx:
-            st.session_state.messages.append({
-                "role": "docx",
-                "content": report_docx,
-                "query": st.session_state.current_state.get("enriched_query", "report"),
-            })
+            st.session_state.messages.append(
+                {
+                    "role": "docx",
+                    "content": report_docx,
+                    "query": st.session_state.current_state.get(
+                        "enriched_query", "report"
+                    ),
+                }
+            )
 
         s = st.session_state.current_state
         project_name = s.get("enriched_query", "Research Project")[:40]

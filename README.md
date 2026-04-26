@@ -2,7 +2,7 @@
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
 
-BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report — pulling from PubMed literature and NIH-funded grants, clustering findings by topic, verifying every claim against its source, and producing an annotated Word document with inline citations.
+BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report, pulling from PubMed literature and NIH-funded grants, clustering findings by topic, verifying every claim against its source, and producing an annotated Word document with inline citations.
 
 ---
 
@@ -33,12 +33,12 @@ BioInsight Radar:
 
 ## Key Features
 
-- **Human-in-the-loop checkpoint** — you see a preliminary overview and data assessment before the full analysis runs, with the option to fetch more data targeting specific gaps
-- **Persistent vector library** — ChromaDB stores BioBERT embeddings on disk; repeat queries on the same topic reuse ingested data without re-fetching
-- **Sentence-level provenance** — each abstract and grant is split into sentence passages at ingest; citations trace back to the exact source document
-- **Dual-source analysis** — query PubMed (published findings) and NIH Reporter (active grant funding) independently or together; the report separates "what research shows" from "where funding is going"
-- **Configurable fetch depth** — Quick (~150 docs/yr), Standard (~400), Deep (~800), Everything (all available, cap 3,000)
-- **Structured verification** — every extracted claim is independently checked for factual grounding and query relevance before it appears in the report
+- **Human-in-the-loop checkpoint**: you see a preliminary overview and data assessment before the full analysis runs, with the option to fetch more data targeting specific gaps
+- **Persistent vector library**: ChromaDB stores BioBERT embeddings on disk; repeat queries on the same topic reuse ingested data without re-fetching
+- **Sentence-level provenance**: each abstract and grant is split into sentence passages at ingest; citations trace back to the exact source document
+- **Dual-source analysis**: query PubMed (published findings) and NIH Reporter (active grant funding) independently or together; the report separates "what research shows" from "where funding is going"
+- **Configurable fetch depth**: Quick (~150 docs/yr), Standard (~400), Deep (~800), Everything (all available, cap 3,000)
+- **Structured verification**: every extracted claim is independently checked for factual grounding and query relevance before it appears in the report
 
 ---
 
@@ -167,10 +167,10 @@ The ChromaDB library is created at `./bioinsight_db/` on first run and persists 
 
 **Choose fetch depth** in the sidebar before querying. Standard is a good starting point; Deep or Everything for comprehensive analysis.
 
-**Review the preliminary overview** — the app pauses here and shows you a coverage breakdown panel (document counts by year and source, top terms, query coverage). You can:
-- **Run Full Analysis** — proceeds to clustering, extraction, and report writing
-- **Fetch More** — targets gaps the assessor identified with additional search terms
-- **New Query** — start over
+**Review the preliminary overview**: the app pauses here and shows you a coverage breakdown panel (document counts by year and source, top terms, query coverage). You can:
+- **Run Full Analysis**: proceeds to clustering, extraction, and report writing
+- **Fetch More**: targets gaps the assessor identified with additional search terms
+- **New Query**: start over
 
 **Download the `.docx`** from the final report — every citation is a clickable link back to the original PubMed abstract or NIH Reporter grant page.
 
@@ -215,8 +215,8 @@ Availability is checked before each fetch — if fewer records exist for a year/
 
 Every extracted finding passes two independent gates before appearing in the report:
 
-1. **Factual support** — is this claim explicitly stated as an established result in the source document? Research aims, hypotheses, and background statements are rejected.
-2. **Query relevance** — does this claim directly address what you asked? Methodological details and tangential findings are rejected.
+1. **Factual support**: is this claim explicitly stated as an established result in the source document? Research aims, hypotheses, and background statements are rejected.
+2. **Query relevance**: does this claim directly address what you asked? Methodological details and tangential findings are rejected.
 
 Both gates must pass. Claims that fail either are dropped with a logged reason.
 

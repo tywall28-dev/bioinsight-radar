@@ -1,3 +1,6 @@
+
+
+
 # BioInsight Radar
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
@@ -21,7 +24,7 @@ You type a question like:
 BioInsight Radar:
 
 1. **Parses and refines** your question into structured search terms, separating what you explicitly asked about from what it should broaden to cover
-2. **Checks a persistent local library** — if relevant data already exists, fetching is skipped
+2. **Checks a persistent local library** if relevant data already exists, fetching is skipped
 3. **Fetches from PubMed and NIH Reporter** with configurable depth (150–3,000 docs/year/source)
 4. **Shows a preliminary overview and data coverage panel** so you can decide whether to run the full analysis or fetch more before committing
 5. **Clusters the corpus** with UMAP + HDBSCAN on 768-D BioBERT embeddings to find thematic groups without predefining categories
@@ -33,12 +36,12 @@ BioInsight Radar:
 
 ## Key Features
 
-- **Human-in-the-loop checkpoint**: you see a preliminary overview and data assessment before the full analysis runs, with the option to fetch more data targeting specific gaps
-- **Persistent vector library**: ChromaDB stores BioBERT embeddings on disk; repeat queries on the same topic reuse ingested data without re-fetching
-- **Sentence-level provenance**: each abstract and grant is split into sentence passages at ingest; citations trace back to the exact source document
-- **Dual-source analysis**: query PubMed (published findings) and NIH Reporter (active grant funding) independently or together; the report separates "what research shows" from "where funding is going"
-- **Configurable fetch depth**: Quick (~150 docs/yr), Standard (~400), Deep (~800), Everything (all available, cap 3,000)
-- **Structured verification**: every extracted claim is independently checked for factual grounding and query relevance before it appears in the report
+- **Human-in-the-loop checkpoint** you see a preliminary overview and data assessment before the full analysis runs, with the option to fetch more data targeting specific gaps
+- **Persistent vector library** ChromaDB stores BioBERT embeddings on disk; repeat queries on the same topic reuse ingested data without re-fetching
+- **Sentence-level provenance** each abstract and grant is split into sentence passages at ingest; citations trace back to the exact source document
+- **Dual-source analysis** query PubMed (published findings) and NIH Reporter (active grant funding) independently or together; the report separates "what research shows" from "where funding is going"
+- **Configurable fetch depth** Quick (~150 docs/yr), Standard (~400), Deep (~800), Everything (all available, cap 3,000)
+- **Structured verification** every extracted claim is independently checked for factual grounding and query relevance before it appears in the report
 
 ---
 
@@ -207,7 +210,7 @@ bioinsight-radar/
 | Deep | ~800 | Thorough analysis, emerging areas |
 | Everything | All available (cap 3,000) | Complete corpus coverage |
 
-Availability is checked before each fetch — if fewer records exist for a year/source, the full available set is used automatically.
+Availability is checked before each fetch, if fewer records exist for a year/source, the full available set is used automatically.
 
 ---
 
@@ -215,8 +218,8 @@ Availability is checked before each fetch — if fewer records exist for a year/
 
 Every extracted finding passes two independent gates before appearing in the report:
 
-1. **Factual support**: is this claim explicitly stated as an established result in the source document? Research aims, hypotheses, and background statements are rejected.
-2. **Query relevance**: does this claim directly address what you asked? Methodological details and tangential findings are rejected.
+1. **Factual support** is this claim explicitly stated as an established result in the source document? Research aims, hypotheses, and background statements are rejected.
+2. **Query relevance** does this claim directly address what you asked? Methodological details and tangential findings are rejected.
 
 Both gates must pass. Claims that fail either are dropped with a logged reason.
 

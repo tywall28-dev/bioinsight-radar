@@ -1,4 +1,4 @@
-# BioInsight Radar
+# BioInsight
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
 

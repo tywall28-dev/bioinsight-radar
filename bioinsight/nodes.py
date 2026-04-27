@@ -12,6 +12,7 @@ from bioinsight.fetcher_tools import (
     fetch_nih_reporter,
     count_pubmed,
     count_nih_reporter,
+    lookup_mesh_terms,
 )
 from bioinsight.embedder import BioInsightEmbedder
 import umap
@@ -89,6 +90,9 @@ _QUERY_META_WORDS = frozenset({
     "findings", "finding", "published", "emerging", "current", "recent",
     "priorities", "priority", "advances", "advance", "developments",
     "development", "areas", "topics", "approaches",
+    # Publication-type words (users say "pubs", "papers", "articles" to mean literature)
+    "publications", "publication", "pubs", "pub", "papers", "paper",
+    "articles", "article", "journals", "journal",
     # Known multi-word meta phrases
     "funding trends", "grant themes", "grant priorities", "funding priorities",
     "research themes", "research trends", "research landscape",
@@ -121,7 +125,141 @@ def _extract_title_terms(title: str) -> list[str]:
     return out
 
 
+_NICHE_THRESHOLD = 25  # total records (across all years + sources) below this triggers a user check
+
+
+def _format_mesh_context(mesh_context: dict) -> str:
+    """Format MeSH lookup results into a compact block for injection into the refiner prompt."""
+    if not mesh_context:
+        return "No MeSH data available."
+    lines = []
+    for term, info in mesh_context.items():
+        if not info.get("found"):
+            lines.append(
+                f'• "{term}": NOT found in MeSH — likely very specific, informal, or a gene name. '
+                "Keep the user's term as-is."
+            )
+            continue
+        preferred = info.get("preferred_heading", "")
+        is_preferred = info.get("is_preferred_heading", False)
+        is_entry = info.get("is_entry_term", False)
+        entry_terms = info.get("entry_terms", [])
+        tree_nums = info.get("tree_numbers", [])
+        scope = info.get("scope_note", "")
+        if is_preferred:
+            status = f'✓ IS the MeSH preferred heading "{preferred}"'
+        elif is_entry:
+            status = f'→ Entry term (synonym) under MeSH heading "{preferred}"'
+        else:
+            status = f'→ Not in MeSH — closest heading is "{preferred}" (different concept)'
+        line = f'• "{term}": {status}'
+        if tree_nums:
+            line += f"  [Tree: {tree_nums[0]}]"
+        if entry_terms and not is_preferred:
+            line += f"  | Other synonyms: {', '.join(entry_terms[:4])}"
+        if scope:
+            line += f'\n  Scope: "{scope}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def mesh_enrichment_node(state: AgentState) -> dict:
+    """Fetch authoritative MeSH descriptors for anchor + explicit terms before query refining.
+
+    Capped at 5 API calls (~0.6–1.2 s total) to keep latency low.
+    The refiner uses this data to make informed decisions about term normalization.
+    """
+    anchor = (state.get("search_terms") or [""])[0]
+    explicit_terms = state.get("explicit_terms") or []
+
+    terms_to_lookup: list[str] = []
+    if anchor:
+        terms_to_lookup.append(anchor)
+    for t in explicit_terms:
+        if len(terms_to_lookup) >= 5:
+            break
+        if t and t != anchor:
+            terms_to_lookup.append(t)
+
+    if not terms_to_lookup:
+        return {"mesh_context": {}}
+
+    logger.info("MeSH enrichment: looking up %d terms: %s", len(terms_to_lookup), terms_to_lookup)
+    try:
+        mesh_context = lookup_mesh_terms(terms_to_lookup)
+    except Exception as exc:
+        logger.warning("MeSH enrichment failed: %s", exc)
+        mesh_context = {}
+
+    return {"mesh_context": mesh_context}
+
+
+def corpus_scout_node(state: AgentState) -> dict:
+    """Counts available records per year/source before fetching.
+    Sets corpus_is_niche=True when totals are very low so the UI can check with the user."""
+    # Skip on re-fetch passes or after user has already approved the small corpus
+    if state.get("scout_approved") or state.get("fetch_attempts", 0) > 0:
+        return {
+            "corpus_is_niche": False,
+            "scout_results": state.get("scout_results") or {},
+            "scout_total": state.get("scout_total") or 0,
+        }
+
+    years = state["years"]
+    source_filter = state.get("source_filter", "both")
+    pubmed_q = state.get("pubmed_query") or ""
+    nih_q = state.get("nih_query") or ""
+
+    if not pubmed_q or not nih_q:
+        search_terms = state.get("search_terms") or []
+        pq, nq = _build_queries(
+            search_terms,
+            fallback=state.get("enriched_query", ""),
+            explicit_terms=state.get("explicit_terms") or [],
+            expansion_terms=state.get("expansion_terms") or [],
+        )
+        pubmed_q = pubmed_q or pq
+        nih_q = nih_q or nq
+
+    scout_results: dict = {}
+    total = 0
+
+    for year in years:
+        year_counts: dict = {}
+        if source_filter in ("pubmed", "both", None):
+            try:
+                n = count_pubmed(pubmed_q, year)
+                year_counts["pubmed"] = n
+                total += n
+            except Exception:
+                year_counts["pubmed"] = 0
+        if source_filter in ("nih_reporter", "both", None):
+            try:
+                n = count_nih_reporter(nih_q, year)
+                year_counts["nih_reporter"] = n
+                total += n
+            except Exception:
+                year_counts["nih_reporter"] = 0
+        scout_results[str(year)] = year_counts
+
+    corpus_is_niche = total < _NICHE_THRESHOLD
+    logger.info("Corpus scout: total=%d niche=%s", total, corpus_is_niche)
+    return {
+        "scout_results": scout_results,
+        "scout_total": total,
+        "corpus_is_niche": corpus_is_niche,
+    }
+
+
+def query_approval_node(state: AgentState) -> dict:
+    """Pure interrupt point. Query strings were already computed by query_refiner_node."""
+    return {}
+
+
 def router_node(state: AgentState) -> dict:
+    import datetime as _dt
+    _current_year = _dt.date.today().year
+
     prompt = f"""You are parsing a biomedical research question to query PubMed and NIH Reporter.
 
     Your tasks:
@@ -190,6 +328,11 @@ def router_node(state: AgentState) -> dict:
         + [t for t in expansion if t != anchor and t not in explicit]
     )
 
+    # Guard: years must never be empty — ChromaDB $in operator rejects empty lists
+    years = parsed.get("years") or []
+    if not years:
+        years = [_current_year - 1, _current_year]
+
     return {
         "query_vector": query_vector,
         "search_terms": search_terms or parsed.get("search_terms", []),
@@ -197,7 +340,7 @@ def router_node(state: AgentState) -> dict:
         "expansion_terms": expansion,
         "enriched_query": parsed["enriched_query"],
         "domain": parsed["domain"],
-        "years": parsed["years"],
+        "years": years,
         "specificity": parsed["specificity"],
         "source_filter": parsed["source_filter"],
     }
@@ -222,6 +365,9 @@ def query_refiner_node(state: AgentState) -> dict:
     source_filter = state.get("source_filter", "both")
     specificity = state.get("specificity", 3)
 
+    mesh_context = state.get("mesh_context") or {}
+    mesh_block = _format_mesh_context(mesh_context)
+
     prompt = f"""You are a biomedical search query expert. Validate and refine this parsed query.
 
 ORIGINAL USER QUESTION: "{user_query}"
@@ -235,26 +381,51 @@ CURRENT PARSED QUERY:
 - Specificity: {specificity}/5
 - Current year: {current_year}
 
+MESH GROUNDING DATA (authoritative NCBI descriptors — use this to make better decisions):
+{mesh_block}
+
+How to use MeSH data:
+- If a term IS the preferred heading → it's already optimal; use it as-is.
+- If a term IS an entry term (synonym) under a preferred heading → it's valid and specific;
+  keep the user's version. You may mention the preferred heading in refinement_notes.
+- If a term is NOT in MeSH → it may be a gene, protein, or informal term; keep it exactly.
+- NEVER substitute one concept for another just to match a MeSH heading. If the preferred
+  heading is a broader/different concept (e.g. "infralimbic cortex" → MeSH "Prefrontal Cortex"),
+  keep the user's specific term — do NOT replace it with the broader heading.
+
 TASK — check each of the following and correct if needed:
 
-1. ANCHOR TERM: Is it the correct MeSH-preferred heading?
-   - "Parkinson's Disease" → "Parkinson Disease"
-   - "Alzheimer's" → "Alzheimer Disease"
-   - "COVID" → "COVID-19"
-   Keep it 1-3 words.
+1. ANCHOR TERM — Only fix obvious shorthand or possessive forms. NEVER substitute one
+   specific scientific concept for another.
+   ALLOWED corrections (common name → standard form):
+   - "Parkinson's Disease" → "Parkinson Disease"  (possessive → standard)
+   - "Alzheimer's" → "Alzheimer Disease"  (abbreviation → full name)
+   - "COVID" → "COVID-19"  (abbreviation → full name)
+   NOT allowed: replacing one specific anatomical region, gene, pathway, or biological
+   concept with a different one, even if the replacement is "closer" to MeSH.
+   Examples of what NOT to do:
+   - "infralimbic" → do NOT change to "prelimbic" (different brain region)
+   - "ventral striatum" → do NOT change to "nucleus accumbens" (related but distinct)
+   - "LRRK2 G2019S" → do NOT simplify to "LRRK2" (user specified the variant)
+   If the user's term is specific and scientifically valid, keep it exactly.
+   If a closely related MeSH heading exists but differs from the user's term, note it
+   in refinement_notes but DO NOT change the term.
 
 2. EXPLICIT TERMS: Are these truly concepts the user explicitly asked about?
    If the user didn't name it directly, move it to expansion_terms instead.
+   Apply the same rule as #1 — never substitute one specific term for another.
    Keep each term 1-3 words.
 
 3. EXPANSION TERMS: Are they useful and distinct from explicit? Replace vague or
-   redundant ones. 0-3 terms max. Each must be 1-3 words, MeSH-compatible.
+   redundant ones. 0-3 terms max. Each must be 1-3 words.
+   Do not add expansion terms that are close synonyms of the anchor — that narrows
+   rather than broadens. Add terms that cover adjacent but distinct aspects.
 
-4. SOURCE FILTER (Option 3 — source-aware strategy):
+4. SOURCE FILTER:
    - Question is about published findings, mechanisms, biology, clinical results
      → prefer "pubmed" or "both"
    - Question is about funding trends, grants, what NIH is investing in, emerging
-     priorities, program officer perspective → prefer "nih_reporter" or "both"
+     priorities → prefer "nih_reporter" or "both"
    - Question explicitly mentions both perspectives → "both"
    Adjust if the current filter doesn't match the intent.
 
@@ -271,7 +442,8 @@ Respond in valid JSON only:
   "expansion_terms": ["..."],
   "years": [...],
   "source_filter": "pubmed|nih_reporter|both",
-  "refinement_notes": "1-2 sentences: what changed and why. If nothing changed, say 'Query looks well-formed — no changes needed.'"
+  "refinement_notes": "1-2 sentences. If you kept a user term that differs from a MeSH heading, say so and name the MeSH heading for reference. If nothing changed, say 'Query looks well-formed — no changes needed.'",
+  "clarifying_question": "One focused question to ask the user when the query is ambiguous OR specificity >= 4. Goal: confirm the user's exact intent before fetching. Examples: 'Are you focused on the infralimbic cortex specifically, or the broader medial prefrontal cortex?', 'Do you want recent clinical trial results, animal model studies, or both?' Leave empty string if the query intent is already clear."
 }}"""
 
     try:
@@ -296,20 +468,39 @@ Respond in valid JSON only:
                 new_search_terms.append(t)
 
         notes = parsed.get("refinement_notes", "")
+        clarifying_question = parsed.get("clarifying_question", "")
+        new_years = parsed.get("years") or years or [current_year - 1, current_year]
+        new_source = parsed.get("source_filter") or source_filter
         logger.info("Query refiner: %s", notes)
+
+        # Compute API query strings now so they're visible at the approval interrupt.
+        # query_approval_node runs AFTER the interrupt, so the refiner is the last
+        # chance to put these into state before the user sees the approval panel.
+        try:
+            pubmed_q, nih_q = _build_queries(
+                new_search_terms,
+                fallback=state.get("enriched_query", ""),
+                explicit_terms=new_explicit,
+                expansion_terms=new_expansion,
+            )
+        except Exception:
+            pubmed_q, nih_q = "", ""
 
         return {
             "search_terms": new_search_terms,
             "explicit_terms": new_explicit,
             "expansion_terms": new_expansion,
-            "years": parsed.get("years") or years,
-            "source_filter": parsed.get("source_filter") or source_filter,
+            "years": new_years,
+            "source_filter": new_source,
             "refinement_notes": notes,
+            "clarifying_question": clarifying_question,
+            "pubmed_query": pubmed_q,
+            "nih_query": nih_q,
         }
 
     except Exception as e:
         logger.error("Query refiner failed: %s", e)
-        return {"refinement_notes": ""}
+        return {"refinement_notes": "", "clarifying_question": "", "pubmed_query": "", "nih_query": ""}
 
 
 def library_checker_node(state: AgentState) -> dict:
@@ -330,10 +521,12 @@ def library_checker_node(state: AgentState) -> dict:
     if specificity >= 4 and fetch_attempts == 0:
         return {"library_has_data": False}
 
-    # Post-fetch: lenient threshold so a successful but partial fetch doesn't loop
+    # Post-fetch: only require ≥1 doc per year — we already fetched everything available,
+    # so if the threshold isn't met the topic is simply very niche. Proceed to the
+    # material_assessor which will honestly report the limited coverage.
     if fetch_attempts > 0:
-        check_docs = max(5, required_docs // 4)
-        check_similarity = 0.05
+        check_docs = 1
+        check_similarity = 0.0
     else:
         check_docs = required_docs
         check_similarity = 0.2 + (specificity * 0.08)
@@ -368,8 +561,8 @@ def _build_queries(
     When no explicit terms are set, all secondaries are ORed for breadth,
     so the anchor alone isn't too narrow.
 
-    PubMed: uses [tiab] field tag (title + abstract) and quoted phrases.
-    NIH:    uses "advanced" operator with no field tags.
+    PubMed: no field tag, no quotes — ATM handles MeSH mapping.
+    NIH:    "advanced" Lucene operator; multi-word anchor joined with AND to prevent OR default.
     """
     explicit_terms = explicit_terms or []
 
@@ -384,11 +577,19 @@ def _build_queries(
     def _nih(t):
         return f'"{t}"' if " " in t else t
 
-    parts_pub = [f'"{anchor}"[tiab]']
-    parts_nih = [f'"{anchor}"']
+    # PubMed anchor: no quotes, no field tag. ATM maps words to MeSH headings and
+    # searches all fields — same behavior as the web UI.
+    parts_pub = [anchor]
+
+    # NIH anchor: "advanced" operator uses Lucene parsing where space-separated
+    # words default to OR. Joining with explicit AND requires all anchor words
+    # to appear somewhere in the grant text, without demanding an exact phrase.
+    nih_anchor = " AND ".join(anchor.split()) if " " in anchor else anchor
+    parts_nih = [nih_anchor]
 
     if explicit_terms:
-        # Explicit terms → each ANDed in both PubMed and NIH (user required these)
+        # Explicit terms → ANDed with [tiab] to keep them as precision filters.
+        # The user specifically named these so results should contain them in-text.
         for t in explicit_terms:
             if t and t != anchor:
                 parts_pub.append(_pub(t))
@@ -400,7 +601,10 @@ def _build_queries(
         # and BioBERT handles topical focus without keyword matching.
         secondary = [t for t in search_terms[1:] if t != anchor]
         if secondary:
-            parts_pub.append(f"({' OR '.join(_pub(t) for t in secondary)})")
+            # Expansion terms also use no field tag for maximum breadth
+            def _pub_broad(t):
+                return f'"{t}"' if " " in t else t
+            parts_pub.append(f"({' OR '.join(_pub_broad(t) for t in secondary)})")
 
     return " AND ".join(parts_pub), " AND ".join(parts_nih)
 
@@ -428,12 +632,18 @@ def fetcher_node(state: AgentState) -> dict:
         test_limit if test_limit > 0 else _FETCH_MODE_LIMITS.get(fetch_mode, 400)
     )
 
-    pubmed_q, nih_q = _build_queries(
-        search_terms,
-        fallback=state.get("enriched_query", ""),
-        explicit_terms=state.get("explicit_terms") or [],
-        expansion_terms=state.get("expansion_terms") or [],
-    )
+    # Use user-edited query strings if present, otherwise build from structured terms
+    if state.get("pubmed_query") or state.get("nih_query"):
+        pubmed_q = state.get("pubmed_query") or ""
+        nih_q = state.get("nih_query") or ""
+        logger.info("Fetcher | mode=%s | using user-edited queries", fetch_mode)
+    else:
+        pubmed_q, nih_q = _build_queries(
+            search_terms,
+            fallback=state.get("enriched_query", ""),
+            explicit_terms=state.get("explicit_terms") or [],
+            expansion_terms=state.get("expansion_terms") or [],
+        )
     logger.info("Fetcher | mode=%s | PubMed: '%s'", fetch_mode, pubmed_q)
     logger.info("Fetcher | mode=%s | NIH:    '%s'", fetch_mode, nih_q)
 
@@ -1006,13 +1216,34 @@ For each claim evaluate TWO things independently:
    - TRUE if the claim provides a specific answer, finding, or insight relevant to what the user asked.
    - FALSE if the claim is factually supported but tangential (e.g., describes methods, animal models, or a different disease/target than asked about).
 
-A claim passes ONLY if BOTH criteria are true.
+A claim passes if BOTH criteria are true.
+
+For claims that FAIL, classify the failure in "fail_reason":
+- "aim": phrased as a research aim, hypothesis, or proposed direction — not yet established
+- "overspecified": the core finding IS in the source but the claim added a clause or detail that is NOT — the source supports part of the claim but not all of it
+- "background": general background knowledge not specifically evidenced by these documents
+- "irrelevant": factually supported but does not address the user's question
+
+For claims where fail_reason="aim" AND is_relevant=true, provide a repaired version in "repaired_claim":
+- Rephrase as an active investigation, preserving ALL named entities, mechanisms, and measurements
+- Use phrases like: "Researchers are investigating whether...", "X is under active investigation as...", "Active work is examining the role of..."
+- Do NOT generalize or strip specifics — keep protein names, pathways, and drug names intact
+
+For claims where fail_reason="overspecified" AND is_relevant=true, provide a repaired version in "repaired_claim":
+- Restate ONLY what the source document explicitly asserts — remove the unsupported clause(s)
+- Preserve all named entities, measurements, and mechanistic details that ARE in the source
+- Do NOT hedge or soften — if the source states it as a fact, state it as a fact
+- Example: claim says "A caused B, supporting C" but source only says "A caused B" → repair is "A caused B"
+
+For all other failures (background, irrelevant, or aim/overspecified where is_relevant=false), set repaired_claim to null.
 
 Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY, in the same order:
 [
   {{
     "is_supported": true,
     "is_relevant": true,
+    "fail_reason": null,
+    "repaired_claim": null,
     "reasoning": "Document explicitly states X; directly addresses the user's question about Y."
   }}
 ]"""
@@ -1033,17 +1264,45 @@ Return ONLY a valid JSON array, same length as CLAIMS TO VERIFY, in the same ord
                     break
                 supported = eval_result.get("is_supported") is True
                 relevant = eval_result.get("is_relevant") is True
+                repaired = eval_result.get("repaired_claim")
+                fail_reason = eval_result.get("fail_reason")
+                reasoning = eval_result.get("reasoning", "")
+
                 if supported and relevant:
                     approved_claims.append(claims_to_check[i])
+                elif repaired and relevant:
+                    if fail_reason == "overspecified":
+                        # Core finding is real — strip the unsupported clause,
+                        # keep as a confirmed finding (no confidence flag)
+                        repaired_obj = {**claims_to_check[i], "claim": repaired}
+                        logger.info(
+                            "Corrected (cluster %d) overspecified → confirmed: %s",
+                            label,
+                            repaired[:80],
+                        )
+                    else:
+                        # Aim-phrased claim repaired as an active investigation
+                        repaired_obj = {
+                            **claims_to_check[i],
+                            "claim": repaired,
+                            "confidence": "preliminary",
+                        }
+                        logger.info(
+                            "Repaired (cluster %d) %s → preliminary: %s",
+                            label,
+                            fail_reason,
+                            repaired[:80],
+                        )
+                    approved_claims.append(repaired_obj)
                 else:
-                    reason = eval_result.get("reasoning", "")
                     logger.warning(
-                        "Dropped (cluster %d) supported=%s relevant=%s: %s | %s",
+                        "Dropped (cluster %d) supported=%s relevant=%s fail_reason=%s: %s | %s",
                         label,
                         supported,
                         relevant,
+                        fail_reason,
                         claims_to_check[i].get("claim"),
-                        reason,
+                        reasoning,
                     )
             return label, approved_claims
 
@@ -1226,8 +1485,9 @@ def report_writer_node(state: AgentState) -> dict:
                 if url:
                     citation_url_map[citation_text] = url
 
-    # Tag each finding with its data source so the LLM can separate them
+    # Tag each finding with its data source and separate confirmed vs preliminary
     tagged_findings = {}
+    preliminary_findings = []
     pubmed_count = 0
     nih_count = 0
     for label, findings in verified_findings.items():
@@ -1237,14 +1497,22 @@ def report_writer_node(state: AgentState) -> dict:
             src = "unknown"
             if evidence_ids:
                 src = evidence_index.get(evidence_ids[0], {}).get("source", "unknown")
-            if src == "pubmed":
-                pubmed_count += 1
-            elif src == "nih_reporter":
-                nih_count += 1
-            tagged.append({**f, "data_source": src})
+            is_preliminary = f.get("confidence") == "preliminary"
+            if not is_preliminary:
+                if src == "pubmed":
+                    pubmed_count += 1
+                elif src == "nih_reporter":
+                    nih_count += 1
+            tagged_f = {**f, "data_source": src}
+            if is_preliminary:
+                preliminary_findings.append(tagged_f)
+            else:
+                tagged.append(tagged_f)
         tagged_findings[label] = tagged
 
     all_findings_text = json.dumps(tagged_findings, indent=2)
+    preliminary_count = len(preliminary_findings)
+    preliminary_text = json.dumps(preliminary_findings, indent=2) if preliminary_findings else ""
 
     has_pubmed = pubmed_count > 0
     has_nih = nih_count > 0
@@ -1263,6 +1531,19 @@ def report_writer_node(state: AgentState) -> dict:
             "All findings come from NIH-funded grant abstracts (NIH Reporter)."
         )
 
+    preliminary_section_instruction = ""
+    if preliminary_findings:
+        preliminary_section_instruction = f"""
+## Research Directions
+These are active investigations — aims and hypotheses that have not yet produced confirmed findings.
+Use hedged language only: "is under active investigation", "researchers are examining", "preliminary work suggests".
+Never present these as established facts.
+Group by theme. Each entry must include its citation.
+
+PRELIMINARY CLAIMS ({preliminary_count} items):
+{preliminary_text}
+"""
+
     synthesis_prompt = f"""You are a senior biomedical research analyst writing an intelligence report for a program officer who needs to make funding decisions.
 
 ORIGINAL USER QUESTION: "{user_query}"
@@ -1271,8 +1552,9 @@ SEARCH SCOPE: {enriched_query} | Years: {years}
 
 The report must directly answer the user's original question. Every section should be framed around what the user asked — not just what the data happens to contain.
 
-VERIFIED FINDINGS ({len(verified_findings)} clusters, {pubmed_count + nih_count} total findings):
+VERIFIED FINDINGS ({len(verified_findings)} clusters, {pubmed_count + nih_count} confirmed findings, {preliminary_count} preliminary):
 Each finding includes a "data_source" field: "pubmed" = published literature, "nih_reporter" = active/recent grant funding.
+Claims with "confidence": "preliminary" MUST appear ONLY in the Research Directions section — never in confirmed finding sections.
 {all_findings_text}
 
 ---
@@ -1317,6 +1599,7 @@ For EACH theme:
 
 Aim for 3-5 themes.'''}
 
+{preliminary_section_instruction if preliminary_findings else ""}
 ## Research Gaps & White Space
 What specific aspects of "{user_query}" are absent or under-represented in the verified findings? Frame gaps in terms of the user's original question — what did they ask about that the data couldn't answer? Be concrete: name missing targets, populations, mechanisms, or time horizons.
 
@@ -1329,7 +1612,8 @@ CRITICAL RULES:
 - Use citation_text EXACTLY as it appears in the JSON (e.g., [Smith et al., 2024]). Never paraphrase or reformat it.
 - Every factual claim must have a citation. No unsupported statements.
 - Do NOT use raw system IDs (nih_reporter__, pubmed__, etc.) anywhere in the output.
-- Frame the entire report in terms of the original user question — not just the enriched query."""
+- Frame the entire report in terms of the original user question — not just the enriched query.
+- Claims with "confidence": "preliminary" belong ONLY in Research Directions — never assert them as established results elsewhere."""
 
     response = synthesis_llm.invoke(synthesis_prompt)
 
@@ -1339,7 +1623,7 @@ CRITICAL RULES:
         report_text = report_text.replace(citation, f"{citation}({url})")
 
     diagnostic = f"""---
-**Analysis Metadata** — Source: {source_filter} | Years: {years} | Unique docs: {unique_docs} | Passages: {total_passages} | Clusters: {len(verified_findings)}
+**Analysis Metadata** — Source: {source_filter} | Years: {years} | Unique docs: {unique_docs} | Passages: {total_passages} | Clusters: {len(verified_findings)} | Confirmed findings: {pubmed_count + nih_count} | Research directions: {preliminary_count}
 
 ---
 

@@ -21,6 +21,17 @@ class AgentState(TypedDict):
         list[str]
     ]  # NIH grant mechanism filter, e.g. ["R01", "R21"]
     refinement_notes: Optional[str]  # what the refiner changed and why
+    clarifying_question: Optional[str]  # follow-up question for user when query is ambiguous
+
+    # Query approval outputs (computed at interrupt, user-editable before fetch)
+    pubmed_query: Optional[str]   # final PubMed query string sent to API
+    nih_query: Optional[str]      # final NIH Reporter query string sent to API
+
+    # Corpus scout outputs (pre-fetch count check)
+    scout_results: Optional[dict]   # {year: {"pubmed": N, "nih_reporter": M}}
+    scout_total: Optional[int]      # total records across all years + sources
+    corpus_is_niche: Optional[bool] # True when total < threshold
+    scout_approved: Optional[bool]  # user explicitly OKed a small-corpus fetch
 
     # Library Checker outputs
     library_has_data: Optional[bool]
@@ -65,6 +76,9 @@ class AgentState(TypedDict):
     report_sidecar: Optional[str]
     report_docx: Optional[bytes]
     final_answer: Optional[str]
+
+    # MeSH enrichment (fetched before query_refiner runs)
+    mesh_context: Optional[dict]  # {term: {found, preferred_heading, entry_terms, ...}}
 
     # Error tracking
     error: Optional[str]

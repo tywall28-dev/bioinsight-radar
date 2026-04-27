@@ -13,14 +13,19 @@ BioInsight Radar is an agentic pipeline that turns a natural-language research q
 
 <video src="https://github.com/user-attachments/assets/1bc09cbc-7a56-407d-90da-5629cdff7030" width="600" controls></video>
 
+<details>
+<summary>Example output (.docx)</summary>
+
 [infralimbic_prefrontal_cortex_research.docx](https://github.com/user-attachments/files/27110909/infralimbic_prefrontal_cortex_research.docx)
+
+</details>
 ---
 
 ## What It Does
 
 You type a question like:
 
-> *"What are the emerging treatment strategies in Parkinson's disease for 2024–2025?"*
+> *"What are the themes in publications and grants for the infralimbic prefrontal cortex region the last few years?"
 
 BioInsight Radar:
 

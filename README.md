@@ -9,10 +9,9 @@
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
 
-<<<<<<< HEAD
 BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report. It pulls from PubMed literature and NIH-funded grants, clusters findings by topic, verifies every claim against its source, and produces an annotated Word document with inline citations.
 
-> **Note on hardware:** Embeddings currently run locally using BioBERT via PyTorch. A GPU is strongly recommended for reasonable ingestion speed. CPU will work but is significantly slower, especially on larger fetch modes.
+**Note on hardware:** Embeddings currently run locally using BioBERT via PyTorch. A GPU is strongly recommended for reasonable ingestion speed. CPU will work but is significantly slower, especially on larger fetch modes.
 =======
 BioInsight Radar is an agentic pipeline that turns a natural-language research question into a structured intelligence report. It pulls from PubMed literature and NIH-funded grants, clusters findings by topic, verifies every claim against its source, and produces an annotated Word document with inline citations. Because the pipeline relies on large language models, verification is probabilistic rather than absolute, but source-level citation allows readers to confirm each claim independently.
 >>>>>>> b78b367355ba94c4da3e16e753411015df3e02d5

@@ -1,3 +1,4 @@
+
 # BioInsight-Radar
 
 **Biomedical research intelligence powered by LangGraph, BioBERT, and Claude.**
@@ -12,6 +13,7 @@ BioInsight Radar is an agentic pipeline that turns a natural-language research q
 
 <video src="https://github.com/user-attachments/assets/1bc09cbc-7a56-407d-90da-5629cdff7030" width="600" controls></video>
 
+[infralimbic_prefrontal_cortex_research.docx](https://github.com/user-attachments/files/27110909/infralimbic_prefrontal_cortex_research.docx)
 ---
 
 ## What It Does
